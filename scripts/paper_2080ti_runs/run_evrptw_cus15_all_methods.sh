@@ -18,12 +18,17 @@ GPU_AWBC="${GPU_AWBC:-3}"
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") {ppo|gpu0|offline|gpu123|all} [train.py args...]
+Usage: $(basename "$0") {ppo|gpu0|offline|gpu123|all} [--foreground|--no-detach|--detach] [train.py args...]
 
 Run groups:
   ppo, gpu0        Run PPO only on GPU_PPO (default: GPU0).
   offline, gpu123  Run DAPG/SLPPO/AWBC only on GPU_DAPG/GPU_SLPPO/GPU_AWBC.
   all              Run the original full pipeline: PPO, then DAPG/SLPPO/AWBC.
+
+Detach:
+  --detach          Run under nohup in the background (default).
+  --foreground,
+  --no-detach       Run in the current terminal for debugging.
 EOF
 }
 
@@ -70,10 +75,55 @@ case "$RUN_GROUP" in
     ;;
 esac
 
+DETACH="${DETACH:-1}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --detach)
+      DETACH=1
+      shift
+      ;;
+    --foreground|--no-detach)
+      DETACH=0
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+EXTRA_ARGS=("$@")
+
 LOG_ROOT="${LOG_ROOT:-results/launch_logs/paper_2080ti_runs}"
-STAMP="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="$LOG_ROOT/${SCRIPT_TAG}_${RUN_GROUP}_seed${SEED}_${STAMP}"
+STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
+RUN_DIR="${RUN_DIR:-$LOG_ROOT/${SCRIPT_TAG}_${RUN_GROUP}_seed${SEED}_${STAMP}}"
 mkdir -p "$RUN_DIR"
+
+if [[ "$DETACH" != "0" && "${CALIROUTE_NOHUP_CHILD:-0}" != "1" ]]; then
+  SCRIPT_PATH="$ROOT_DIR/scripts/paper_2080ti_runs/$(basename "${BASH_SOURCE[0]}")"
+  LAUNCH_LOG="$RUN_DIR/launcher.log"
+  {
+    echo "[Start] $(date '+%F %T') launching ${SCRIPT_TAG} ${RUN_GROUP} under nohup"
+    echo "[Command] ${SCRIPT_PATH} ${RUN_GROUP} ${EXTRA_ARGS[*]}"
+    echo "[Run dir] ${RUN_DIR}"
+  } >"$LAUNCH_LOG"
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid env CALIROUTE_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+      bash "$SCRIPT_PATH" "$RUN_GROUP" "${EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
+  else
+    nohup env CALIROUTE_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+      bash "$SCRIPT_PATH" "$RUN_GROUP" "${EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
+  fi
+  launcher_pid="$!"
+  echo "$launcher_pid" >"$RUN_DIR/launcher.pid"
+  echo "[Detached] ${SCRIPT_TAG} ${RUN_GROUP} pid=${launcher_pid}"
+  echo "[Detached] run dir: ${RUN_DIR}"
+  echo "[Detached] launcher log: ${LAUNCH_LOG}"
+  exit 0
+fi
 
 trap 'echo "[Abort] stopping child jobs"; jobs -pr | xargs -r kill; exit 130' INT TERM
 
@@ -181,8 +231,6 @@ BASE_ARGS=(
   --checkpoint-interval "$CHECKPOINT_INTERVAL"
   --mixed-precision
 )
-
-EXTRA_ARGS=("$@")
 
 launch_ppo() {
   start_job "$GPU_PPO" "${SCRIPT_TAG}_ppo" \
