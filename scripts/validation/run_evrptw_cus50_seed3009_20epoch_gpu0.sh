@@ -11,6 +11,9 @@ SEED="${SEED:-3009}"
 EPOCHS="${EPOCHS:-20}"
 POOL="${SLPPO_POOL:-weighted}"
 USE_PPO_INIT="${USE_PPO_INIT:-0}"
+SKIP_PPO="${SKIP_PPO:-0}"
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+METHODS_TO_RUN="${METHODS_TO_RUN:-ppo slppo dapg awbc}"
 
 CUSTOMERS=50
 CHARGING_STATIONS=10
@@ -39,7 +42,7 @@ run_method() {
   if [[ "$method" == "slppo" ]]; then
     extra_args+=(--pool "$POOL")
   fi
-  if [[ "$USE_PPO_INIT" == "1" && "$method" != "ppo" ]]; then
+  if [[ "$USE_PPO_INIT" == "1" ]]; then
     extra_args+=(--init-checkpoint "$PPO_INIT_CKPT")
   fi
 
@@ -72,11 +75,19 @@ run_method() {
 }
 
 PPO_RUN="CALIROUTE_VALIDATE_EVRPTW_CUS50_PPO_SEED${SEED}_E${EPOCHS}"
-PPO_INIT_CKPT="results/checkpoints/Cus_${CUSTOMERS}_CS_${CHARGING_STATIONS}/${PPO_RUN}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$EVAL_INTERVAL").pt"
+PPO_INIT_CKPT="${INIT_CHECKPOINT:-results/checkpoints/Cus_${CUSTOMERS}_CS_${CHARGING_STATIONS}/${PPO_RUN}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$EVAL_INTERVAL").pt}"
 
-run_method ppo 3
-run_method slppo 4
-run_method dapg 3
-run_method awbc 3
+for method in $METHODS_TO_RUN; do
+  if [[ "$method" == "ppo" && "$SKIP_PPO" == "1" ]]; then
+    continue
+  fi
+  case "$method" in
+    ppo) run_method ppo 3 ;;
+    slppo) run_method slppo 4 ;;
+    dapg) run_method dapg 3 ;;
+    awbc) run_method awbc 3 ;;
+    *) echo "Unknown validation method: $method" >&2; exit 2 ;;
+  esac
+done
 
 "$PYTHON_BIN" scripts/validation/compare_evrptw_cus50_seed3009_20epoch.py

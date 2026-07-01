@@ -6,9 +6,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 NEW_ROOT = ROOT / "results" / "logs" / "Cus_50_CS_10"
-OLD_ROOT = Path("/data/Maojie/EVRPTW-OFFLINE2ONLINE/results/logs/Cus_50_CS_10")
+OLD_ROOTS = (
+    Path("/data/Maojie/EVRPTW-OFFLINE2ONLINE/results/logs/Cus_50_CS_10"),
+    Path("/data/Maojie/EVRPTW-OFFLINE2ONLINE/results_legacy/logs/Cus_50_CS_10"),
+)
 OUT_DIR = ROOT / "results" / "validation" / "evrptw_cus50_seed3009_20epoch"
 METHODS = ("ppo", "slppo", "dapg", "awbc")
+OLD_RUN_NAMES = {
+    "ppo": "O2O_CUS50_OFFLINE_JUDGE_PPO_ROUTE_POS_SEED3009_E1500",
+    "slppo": "O2O_CUS50_SL_PPO_ROUTE_POS_SEED3009_E1500",
+    "dapg": "O2O_CUS50_OFFLINE_JUDGE_DAPG_ROUTE_POS_SEED3009_E1500",
+    "awbc": "O2O_CUS50_AWBC_ROUTE_POS_SEED3009_E1500",
+}
 
 
 def _read_last_eval(path: Path) -> dict[str, str] | None:
@@ -28,13 +37,18 @@ def _find_new(method: str) -> Path | None:
 
 
 def _find_old(method: str) -> Path | None:
-    if not OLD_ROOT.exists():
-        return None
-    tokens = ("cus50", method, "3009")
+    run_name = OLD_RUN_NAMES.get(method)
+    if run_name:
+        for root in OLD_ROOTS:
+            path = root / run_name / "seed_3009" / "eval_log.csv"
+            if path.exists():
+                return path
     candidates = [
         path
-        for path in OLD_ROOT.glob("*/seed_3009/eval_log.csv")
-        if all(token in path.parts[-3].lower() for token in tokens)
+        for root in OLD_ROOTS
+        if root.exists()
+        for path in root.glob("*/seed_3009/eval_log.csv")
+        if _old_name_matches(path.parts[-3].lower(), method)
     ]
     if not candidates:
         return None
@@ -42,10 +56,32 @@ def _find_old(method: str) -> Path | None:
     return candidates[0]
 
 
+def _old_name_matches(name: str, method: str) -> bool:
+    if "cus50" not in name or "seed3009" not in name:
+        return False
+    if method == "ppo":
+        return "ppo" in name and "sl_ppo" not in name and "awbc" not in name and "dapg" not in name
+    if method == "slppo":
+        return "sl_ppo" in name or "slppo" in name
+    return method in name
+
+
 def _metric(row: dict[str, str] | None, key: str) -> str:
     if row is None:
         return ""
-    value = row.get(key, "")
+    aliases = {
+        "min_obj": ("min_obj", "eval_avg_min_objective_distance_km", "eval_avg_objective_distance_km"),
+        "min_veh": ("min_veh", "eval_avg_min_vehicle_count", "eval_avg_vehicle_count"),
+        "med_obj": ("med_obj", "eval_avg_median_objective_distance_km"),
+        "med_veh": ("med_veh", "eval_avg_median_vehicle_count"),
+        "fr": ("fr", "eval_feasible_rate"),
+        "epoch": ("epoch",),
+    }
+    value = ""
+    for candidate in aliases.get(key, (key,)):
+        value = row.get(candidate, "")
+        if value not in (None, ""):
+            break
     return "" if value is None else str(value)
 
 
