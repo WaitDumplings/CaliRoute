@@ -16,9 +16,63 @@ GPU_DAPG="${GPU_DAPG:-1}"
 GPU_SLPPO="${GPU_SLPPO:-2}"
 GPU_AWBC="${GPU_AWBC:-3}"
 
+usage() {
+  cat <<EOF
+Usage: $(basename "$0") {ppo|gpu0|offline|gpu123|all} [train.py args...]
+
+Run groups:
+  ppo, gpu0        Run PPO only on GPU_PPO (default: GPU0).
+  offline, gpu123  Run DAPG/SLPPO/AWBC only on GPU_DAPG/GPU_SLPPO/GPU_AWBC.
+  all              Run the original full pipeline: PPO, then DAPG/SLPPO/AWBC.
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+case "${1:-}" in
+  --mode|--group)
+    shift
+    if [[ $# -eq 0 ]]; then
+      echo "[Error] missing run group after --mode/--group" >&2
+      usage >&2
+      exit 2
+    fi
+    RUN_GROUP="$1"
+    shift
+    ;;
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    RUN_GROUP="$1"
+    shift
+    ;;
+esac
+
+case "$RUN_GROUP" in
+  ppo|gpu0)
+    RUN_GROUP="ppo"
+    ;;
+  offline|gpu123|gpu1-3|gpu1,2,3)
+    RUN_GROUP="offline"
+    ;;
+  all)
+    RUN_GROUP="all"
+    ;;
+  *)
+    echo "[Error] unknown run group: ${RUN_GROUP}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
 LOG_ROOT="${LOG_ROOT:-results/launch_logs/paper_2080ti_runs}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
-RUN_DIR="$LOG_ROOT/${SCRIPT_TAG}_seed${SEED}_${STAMP}"
+RUN_DIR="$LOG_ROOT/${SCRIPT_TAG}_${RUN_GROUP}_seed${SEED}_${STAMP}"
 mkdir -p "$RUN_DIR"
 
 trap 'echo "[Abort] stopping child jobs"; jobs -pr | xargs -r kill; exit 130' INT TERM
@@ -91,6 +145,16 @@ wait_for_checkpoint() {
   echo "[Ready] found PPO init checkpoint: ${ckpt}"
 }
 
+wait_for_checkpoint_file() {
+  local ckpt="$1"
+  echo "[Wait] waiting for PPO init checkpoint: ${ckpt}"
+  while [[ ! -s "$ckpt" ]]; do
+    sleep "$POLL_SECONDS"
+  done
+  sleep 10
+  echo "[Ready] found PPO init checkpoint: ${ckpt}"
+}
+
 BASE_RUN="CALIROUTE_${PROBLEM^^}_CUS${CUSTOMERS}_CS${CS}"
 PPO_RUN="${BASE_RUN}_PPO_SEED${SEED}_E${EPOCHS}_N${NUM_ENVS}_R${ROLLOUT_STEPS}_2080TI"
 DAPG_RUN="${BASE_RUN}_DAPG_SEED${SEED}_E${EPOCHS}_N${NUM_ENVS}_R${ROLLOUT_STEPS}_FROM_PPO${INIT_EPOCH}_2080TI"
@@ -120,18 +184,35 @@ BASE_ARGS=(
 
 EXTRA_ARGS=("$@")
 
-start_job "$GPU_PPO" "${SCRIPT_TAG}_ppo" \
-  "${BASE_ARGS[@]}" --offline-method ppo --ppo-update-epochs 3 --run-name "$PPO_RUN" "${EXTRA_ARGS[@]}"
-PPO_PID="$LAST_PID"
+launch_ppo() {
+  start_job "$GPU_PPO" "${SCRIPT_TAG}_ppo" \
+    "${BASE_ARGS[@]}" --offline-method ppo --ppo-update-epochs 3 --run-name "$PPO_RUN" "${EXTRA_ARGS[@]}"
+  PPO_PID="$LAST_PID"
+}
 
-wait_for_checkpoint "$PPO_PID" "$INIT_CKPT"
+launch_offline() {
+  start_job "$GPU_DAPG" "${SCRIPT_TAG}_dapg" \
+    "${BASE_ARGS[@]}" --offline-method dapg --ppo-update-epochs 3 --init-checkpoint "$INIT_CKPT" --run-name "$DAPG_RUN" "${EXTRA_ARGS[@]}"
+  start_job "$GPU_SLPPO" "${SCRIPT_TAG}_slppo" \
+    "${BASE_ARGS[@]}" --offline-method slppo --pool "$SLPPO_POOL" --ppo-update-epochs 4 --init-checkpoint "$INIT_CKPT" --run-name "$SLPPO_RUN" "${EXTRA_ARGS[@]}"
+  start_job "$GPU_AWBC" "${SCRIPT_TAG}_awbc" \
+    "${BASE_ARGS[@]}" --offline-method awbc --ppo-update-epochs 3 --init-checkpoint "$INIT_CKPT" --run-name "$AWBC_RUN" "${EXTRA_ARGS[@]}"
+}
 
-start_job "$GPU_DAPG" "${SCRIPT_TAG}_dapg" \
-  "${BASE_ARGS[@]}" --offline-method dapg --ppo-update-epochs 3 --init-checkpoint "$INIT_CKPT" --run-name "$DAPG_RUN" "${EXTRA_ARGS[@]}"
-start_job "$GPU_SLPPO" "${SCRIPT_TAG}_slppo" \
-  "${BASE_ARGS[@]}" --offline-method slppo --pool "$SLPPO_POOL" --ppo-update-epochs 4 --init-checkpoint "$INIT_CKPT" --run-name "$SLPPO_RUN" "${EXTRA_ARGS[@]}"
-start_job "$GPU_AWBC" "${SCRIPT_TAG}_awbc" \
-  "${BASE_ARGS[@]}" --offline-method awbc --ppo-update-epochs 3 --init-checkpoint "$INIT_CKPT" --run-name "$AWBC_RUN" "${EXTRA_ARGS[@]}"
+case "$RUN_GROUP" in
+  ppo)
+    launch_ppo
+    ;;
+  offline)
+    wait_for_checkpoint_file "$INIT_CKPT"
+    launch_offline
+    ;;
+  all)
+    launch_ppo
+    wait_for_checkpoint "$PPO_PID" "$INIT_CKPT"
+    launch_offline
+    ;;
+esac
 
 status=0
 for i in "${!PIDS[@]}"; do
