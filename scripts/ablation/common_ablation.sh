@@ -6,6 +6,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CALLER_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)/$(basename "${BASH_SOURCE[1]}")"
 cd "$ROOT_DIR"
 
 if [[ -z "${DATA_ROOT:-}" ]]; then
@@ -17,26 +18,57 @@ if [[ -z "${DATA_ROOT:-}" ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
-AB_STAGE="${1:-all}"
+DETACH="${DETACH:-1}"
+AB_STAGE="all"
+AB_STAGE_SEEN=0
+AB_EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --detach)
+      DETACH=1
+      shift
+      ;;
+    --foreground|--no-detach)
+      DETACH=0
+      shift
+      ;;
+    --)
+      shift
+      AB_EXTRA_ARGS+=("$@")
+      break
+      ;;
+    *)
+      if [[ "$AB_STAGE_SEEN" == "0" ]]; then
+        AB_STAGE="$1"
+        AB_STAGE_SEEN=1
+      else
+        AB_EXTRA_ARGS+=("$1")
+      fi
+      shift
+      ;;
+  esac
+done
+set -- "${AB_EXTRA_ARGS[@]}"
 case "$AB_STAGE" in
   -h|--help|help)
     cat <<EOF
 Usage:
-  bash scripts/ablation/server*.sh init
-  bash scripts/ablation/server*.sh ppo
-  bash scripts/ablation/server*.sh offline
-  bash scripts/ablation/server*.sh all
+  bash scripts/ablation/server*.sh [init|ppo|offline|all] [--detach|--foreground|--no-detach]
 
 Stages:
   init     Train the shared PPO epoch-${INIT_EPOCH:-100} initial checkpoint only.
   ppo      Ensure the shared PPO initial checkpoint, then run this server's PPO ablation jobs.
   offline  Wait for the shared PPO initial checkpoint, then run non-PPO jobs.
   all      Run init if needed, then this server's PPO and offline jobs.
+
+Detach:
+  --detach      Run the stage under nohup in the background (default).
+  --foreground,
+  --no-detach   Run in the current terminal for debugging.
 EOF
     exit 0
     ;;
   init|ppo|offline|all)
-    shift || true
     ;;
   *)
     echo "[Error] unknown stage: ${AB_STAGE}" >&2
@@ -109,6 +141,28 @@ COMMON_ARGS=(
 IFS=',' read -r -a GPU_LIST <<<"${GPU_LIST:-$GPU_LIST_DEFAULT}"
 RUN_DIR="${RUN_DIR:-$LOG_ROOT/${SCRIPT_TAG:-ablation}_seed${SEED}_${STAMP}}"
 mkdir -p "$RUN_DIR"
+
+if [[ "$DETACH" != "0" && "${CALIROUTE_ABLATION_NOHUP_CHILD:-0}" != "1" ]]; then
+  LAUNCH_LOG="$RUN_DIR/launcher.log"
+  {
+    echo "[Start] $(date '+%F %T') launching ${SCRIPT_TAG:-ablation} stage=${AB_STAGE} under nohup"
+    echo "[Command] ${CALLER_SCRIPT} ${AB_STAGE} ${AB_EXTRA_ARGS[*]}"
+    echo "[Run dir] ${RUN_DIR}"
+  } >"$LAUNCH_LOG"
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+      bash "$CALLER_SCRIPT" "$AB_STAGE" "${AB_EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
+  else
+    nohup env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+      bash "$CALLER_SCRIPT" "$AB_STAGE" "${AB_EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
+  fi
+  launcher_pid="$!"
+  echo "$launcher_pid" >"$RUN_DIR/launcher.pid"
+  echo "[Detached] ${SCRIPT_TAG:-ablation} stage=${AB_STAGE} pid=${launcher_pid}"
+  echo "[Detached] run dir: ${RUN_DIR}"
+  echo "[Detached] launcher log: ${LAUNCH_LOG}"
+  exit 0
+fi
 
 gpu_mem_used() {
   local gpu="$1"

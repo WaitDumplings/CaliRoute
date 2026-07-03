@@ -31,13 +31,19 @@ Check the script interface:
 bash scripts/ablation/server2_rdi_4gpu.sh help
 ```
 
-Each script accepts one stage argument:
+Each script accepts one stage argument and detaches under `nohup` by default:
 
 ```bash
 bash scripts/ablation/serverX_*.sh init
 bash scripts/ablation/serverX_*.sh ppo
 bash scripts/ablation/serverX_*.sh offline
 bash scripts/ablation/serverX_*.sh all
+```
+
+Use `--foreground` or `--no-detach` when you want to debug in the current terminal:
+
+```bash
+bash scripts/ablation/serverX_*.sh ppo --foreground
 ```
 
 - `init`: train the shared PPO epoch-100 initial checkpoint only.
@@ -210,37 +216,40 @@ Offline jobs:
 | `s4_ntraj5` | SL-PPO | `n_traj=5` |
 | `s4_ntraj15` | SL-PPO | `n_traj=15` |
 
-## tmux Templates
+## Nohup Templates
 
-Use one tmux session per stage so the job survives SSH disconnects.
+The server scripts detach the whole stage with `nohup` by default. The command
+returns after writing the detached launcher pid and log path.
 
 ```bash
-tmux new-session -s s2_rdi_ppo
 cd /data/Maojie/CaliRoute
 bash scripts/ablation/server2_rdi_4gpu.sh ppo
 ```
 
-For a two-stage server:
+For a two-stage server, launch PPO first and launch offline after the PPO stage
+has finished:
 
 ```bash
-tmux new-session -s s3_ppo
 cd /data/Maojie/CaliRoute
 bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh ppo
 ```
 
-After the PPO stage finishes:
-
 ```bash
-tmux new-session -s s3_offline
 cd /data/Maojie/CaliRoute
 bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh offline
 ```
 
-List and reattach:
+Each detached stage writes:
 
 ```bash
-tmux list-sessions
-tmux attach -t s3_offline
+results/launch_logs/ablation/<script_tag>_seed<seed>_<timestamp>/launcher.log
+results/launch_logs/ablation/<script_tag>_seed<seed>_<timestamp>/launcher.pid
+```
+
+Use `--foreground` for short sanity checks or debugging:
+
+```bash
+EPOCHS=1 EVAL_INTERVAL=0 GPU_LIST=0 bash scripts/ablation/server2_rdi_4gpu.sh ppo --foreground
 ```
 
 ## Common Overrides
