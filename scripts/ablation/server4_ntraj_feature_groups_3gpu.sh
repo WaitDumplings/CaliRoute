@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_TAG="server4_ntraj_feature_groups"
+GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0,1,2}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_ablation.sh"
 
 wait_for_init_checkpoint
