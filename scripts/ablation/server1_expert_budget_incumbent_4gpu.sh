@@ -5,6 +5,14 @@ SCRIPT_TAG="server1_expert_budget_incumbent"
 GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0,1,2,3}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_ablation.sh"
 
+if stage_runs_init; then
+  run_init_ppo "${GPU_LIST[0]}"
+fi
+if [[ "$AB_STAGE" == "init" || "$AB_STAGE" == "ppo" ]]; then
+  echo "[Done] stage=${AB_STAGE}; Server1 has no PPO ablation rows beyond the shared init."
+  exit 0
+fi
+
 wait_for_init_checkpoint
 
 EXPERT_TRACE="${EXPERT_TRACE:-$DATA_ROOT/${PROBLEM}/train/Cus${CUSTOMERS}/gurobi_time_trace.csv}"

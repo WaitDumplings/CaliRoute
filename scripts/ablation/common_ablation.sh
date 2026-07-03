@@ -17,6 +17,34 @@ if [[ -z "${DATA_ROOT:-}" ]]; then
 fi
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
+AB_STAGE="${1:-all}"
+case "$AB_STAGE" in
+  -h|--help|help)
+    cat <<EOF
+Usage:
+  bash scripts/ablation/server*.sh init
+  bash scripts/ablation/server*.sh ppo
+  bash scripts/ablation/server*.sh offline
+  bash scripts/ablation/server*.sh all
+
+Stages:
+  init     Train the shared PPO epoch-${INIT_EPOCH:-100} initial checkpoint only.
+  ppo      Ensure the shared PPO initial checkpoint, then run this server's PPO ablation jobs.
+  offline  Wait for the shared PPO initial checkpoint, then run non-PPO jobs.
+  all      Run init if needed, then this server's PPO and offline jobs.
+EOF
+    exit 0
+    ;;
+  init|ppo|offline|all)
+    shift || true
+    ;;
+  *)
+    echo "[Error] unknown stage: ${AB_STAGE}" >&2
+    echo "Choose one of: init, ppo, offline, all" >&2
+    exit 2
+    ;;
+esac
+
 PROBLEM="${PROBLEM:-evrptw}"
 CUSTOMERS="${CUSTOMERS:-100}"
 CS="${CS:-20}"
@@ -41,11 +69,17 @@ STAMP="${STAMP:-$(date +%Y%m%d_%H%M%S)}"
 LOG_ROOT="${LOG_ROOT:-results/launch_logs/ablation}"
 
 BASE_RUN="CALIROUTE_${PROBLEM^^}_CUS${CUSTOMERS}_CS${CS}"
-DEFAULT_INIT_RUN="${BASE_RUN}_PPO_SEED${SEED}_E${EPOCHS}_N${NUM_ENVS}_R${ROLLOUT_STEPS}_2080TI"
+INIT_RUN_NAME="${INIT_RUN_NAME:-${BASE_RUN}_PPO_INIT_SEED${SEED}_E${INIT_EPOCH}_N${NUM_ENVS}_R${ROLLOUT_STEPS}_2080TI}"
 LEGACY_INIT_CKPT="../EVRPTW-OFFLINE2ONLINE/results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/O2O_CUS${CUSTOMERS}_PPO_ROUTE_POS_SEED${SEED}_E1500_N128_CHUNK32_EVAL20/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt"
-LOCAL_INIT_CKPT="results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/${DEFAULT_INIT_RUN}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt"
+LOCAL_INIT_CKPT="results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/${INIT_RUN_NAME}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt"
+INIT_CKPT_EXPLICIT=0
+if [[ -n "${INIT_CKPT:-}" ]]; then
+  INIT_CKPT_EXPLICIT=1
+fi
 if [[ -z "${INIT_CKPT:-}" ]]; then
-  if [[ -s "$LEGACY_INIT_CKPT" ]]; then
+  if [[ -s "$LOCAL_INIT_CKPT" ]]; then
+    INIT_CKPT="$LOCAL_INIT_CKPT"
+  elif [[ -s "$LEGACY_INIT_CKPT" ]]; then
     INIT_CKPT="$LEGACY_INIT_CKPT"
   else
     INIT_CKPT="$LOCAL_INIT_CKPT"
@@ -115,6 +149,18 @@ wait_for_init_checkpoint() {
   echo "[Ready] ${INIT_CKPT}"
 }
 
+stage_runs_init() {
+  [[ "$AB_STAGE" == "init" || "$AB_STAGE" == "ppo" || "$AB_STAGE" == "all" ]]
+}
+
+stage_runs_ppo_jobs() {
+  [[ "$AB_STAGE" == "ppo" || "$AB_STAGE" == "all" ]]
+}
+
+stage_runs_offline_jobs() {
+  [[ "$AB_STAGE" == "offline" || "$AB_STAGE" == "all" ]]
+}
+
 start_job() {
   local physical_gpu="$1"
   local tag="$2"
@@ -147,6 +193,41 @@ wait_batch() {
   PIDS=()
   TAGS=()
   return "$status"
+}
+
+run_init_ppo() {
+  local physical_gpu="${1:-${GPU_LIST[0]}}"
+  if [[ -s "$INIT_CKPT" ]]; then
+    echo "[Skip] PPO init checkpoint already exists: ${INIT_CKPT}"
+    return 0
+  fi
+  if [[ "$INIT_CKPT_EXPLICIT" == "1" && "$INIT_CKPT" != "$LOCAL_INIT_CKPT" ]]; then
+    echo "[Error] explicit INIT_CKPT does not exist: ${INIT_CKPT}" >&2
+    echo "Unset INIT_CKPT to let this script create ${LOCAL_INIT_CKPT}, or pass a valid checkpoint." >&2
+    exit 1
+  fi
+  INIT_CKPT="$LOCAL_INIT_CKPT"
+  echo "[InitPPO] training shared PPO initial checkpoint on GPU${physical_gpu}: ${INIT_CKPT}"
+  start_job "$physical_gpu" "ppo_init" \
+    "${COMMON_ARGS[@]}" \
+    --offline-method ppo \
+    --epochs "$INIT_EPOCH" \
+    --ppo-update-epochs 3 \
+    --eval-interval 0 \
+    --distance-source road \
+    --rdi-embedding none \
+    --rdi-encoder-bias on \
+    --rdi-encoder-norm softmax \
+    --dde on \
+    --qkv-delta none \
+    --action-key on \
+    --action-bias on \
+    --run-name "$INIT_RUN_NAME"
+  wait_batch
+  if [[ ! -s "$INIT_CKPT" ]]; then
+    echo "[Error] PPO init stage finished but checkpoint is missing: ${INIT_CKPT}" >&2
+    exit 1
+  fi
 }
 
 trap 'echo "[Abort] stopping child jobs"; jobs -pr | xargs -r kill; exit 130' INT TERM

@@ -14,7 +14,7 @@ corresponding physical server. The script assigns jobs to local GPUs in waves:
 Example:
 
 ```bash
-bash scripts/ablation/server2_rdi_4gpu.sh
+bash scripts/ablation/server2_rdi_4gpu.sh ppo
 ```
 
 Useful overrides:
@@ -27,6 +27,34 @@ EPOCHS=300 bash scripts/ablation/server1_expert_budget_incumbent_4gpu.sh
 
 All scripts source `common_ablation.sh`, which controls shared paths, seed,
 2080Ti-safe batch geometry, logging, and GPU-memory monitoring.
+
+## Stages
+
+Each server script accepts a stage argument:
+
+```bash
+bash scripts/ablation/serverX_*.sh init
+bash scripts/ablation/serverX_*.sh ppo
+bash scripts/ablation/serverX_*.sh offline
+bash scripts/ablation/serverX_*.sh all
+```
+
+- `init`: train the shared PPO epoch-100 initial checkpoint only.
+- `ppo`: ensure the shared PPO initial checkpoint, then run this server's PPO
+  ablation jobs.
+- `offline`: wait for the shared PPO initial checkpoint, then run non-PPO jobs
+  such as SL-PPO/AWBC/DAPG.
+- `all`: run the init stage if needed, then run both PPO and offline jobs for
+  that server.
+
+Stage split by server:
+
+| Server | `ppo` stage | `offline` stage |
+| --- | --- | --- |
+| Server1 | shared PPO init only | 10 expert-budget x incumbent SL-PPO jobs |
+| Server2 | 8 RDI PPO jobs | no non-PPO jobs |
+| Server3 | 4 AGDA/progressive PPO jobs | 5 progressive/advantage SL-PPO jobs |
+| Server4 | 3 AGDA feature-group PPO jobs | 3 n_traj SL-PPO jobs |
 
 The default Cus100 geometry is:
 

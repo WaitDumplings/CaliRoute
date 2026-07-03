@@ -5,6 +5,14 @@ SCRIPT_TAG="server4_ntraj_feature_groups"
 GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0,1,2}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_ablation.sh"
 
+if stage_runs_init; then
+  run_init_ppo "${GPU_LIST[0]}"
+fi
+if [[ "$AB_STAGE" == "init" ]]; then
+  echo "[Done] stage=init"
+  exit 0
+fi
+
 wait_for_init_checkpoint
 
 FULL_ARCH_ARGS=(
@@ -40,33 +48,40 @@ launch_job() {
   fi
 }
 
-# Part A: run K=100 first because it is the OOM-risk cell.
-launch_job "ntraj100" "slppo" 4 \
-  --n-traj 100 \
-  "${FULL_ARCH_ARGS[@]}"
-wait_batch
+if stage_runs_ppo_jobs; then
+  # Part B: AGDA dynamic-feature group ablation, fixed full RDI and plain PPO.
+  launch_job "without_distance_features" "ppo" 3 \
+    "${FULL_ARCH_ARGS[@]}" \
+    --agda-drop-groups distance
 
-job_idx=0
-launch_job "ntraj5" "slppo" 4 \
-  --n-traj 5 \
-  "${FULL_ARCH_ARGS[@]}"
+  launch_job "without_capacity_features" "ppo" 3 \
+    "${FULL_ARCH_ARGS[@]}" \
+    --agda-drop-groups capacity
 
-launch_job "ntraj15" "slppo" 4 \
-  --n-traj 15 \
-  "${FULL_ARCH_ARGS[@]}"
+  launch_job "without_battery_features" "ppo" 3 \
+    "${FULL_ARCH_ARGS[@]}" \
+    --agda-drop-groups battery
 
-# Part B: AGDA dynamic-feature group ablation, fixed full RDI and plain PPO.
-launch_job "without_distance_features" "ppo" 3 \
-  "${FULL_ARCH_ARGS[@]}" \
-  --agda-drop-groups distance
+  wait_batch
+  job_idx=0
+fi
 
-launch_job "without_capacity_features" "ppo" 3 \
-  "${FULL_ARCH_ARGS[@]}" \
-  --agda-drop-groups capacity
+if stage_runs_offline_jobs; then
+  # Part A: run K=100 first because it is the OOM-risk cell.
+  launch_job "ntraj100" "slppo" 4 \
+    --n-traj 100 \
+    "${FULL_ARCH_ARGS[@]}"
+  wait_batch
 
-launch_job "without_battery_features" "ppo" 3 \
-  "${FULL_ARCH_ARGS[@]}" \
-  --agda-drop-groups battery
+  job_idx=0
+  launch_job "ntraj5" "slppo" 4 \
+    --n-traj 5 \
+    "${FULL_ARCH_ARGS[@]}"
+
+  launch_job "ntraj15" "slppo" 4 \
+    --n-traj 15 \
+    "${FULL_ARCH_ARGS[@]}"
+fi
 
 wait_batch
 echo "[All done] logs: ${RUN_DIR}"

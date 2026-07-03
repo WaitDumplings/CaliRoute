@@ -5,6 +5,18 @@ SCRIPT_TAG="server2_rdi"
 GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0,1,2,3}"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_ablation.sh"
 
+if stage_runs_init; then
+  run_init_ppo "${GPU_LIST[0]}"
+fi
+if [[ "$AB_STAGE" == "init" ]]; then
+  echo "[Done] stage=init"
+  exit 0
+fi
+if stage_runs_offline_jobs && ! stage_runs_ppo_jobs; then
+  echo "[Done] stage=offline; Server2 has no non-PPO jobs."
+  exit 0
+fi
+
 wait_for_init_checkpoint
 
 NN_MATCH_CSV="$RUN_DIR/rdi_nn_match.csv"
