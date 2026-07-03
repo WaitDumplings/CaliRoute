@@ -267,7 +267,6 @@ run_init_ppo() {
     --offline-method ppo \
     --epochs "$INIT_EPOCH" \
     --ppo-update-epochs 3 \
-    --eval-interval 0 \
     --distance-source road \
     --rdi-embedding none \
     --rdi-encoder-bias on \
