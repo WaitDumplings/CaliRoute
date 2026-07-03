@@ -23,7 +23,7 @@ CS="${CS:-20}"
 SEED="${SEED:-3009}"
 EPOCHS="${EPOCHS:-1500}"
 INIT_EPOCH="${INIT_EPOCH:-100}"
-NUM_ENVS="${NUM_ENVS:-64}"
+NUM_ENVS="${NUM_ENVS:-24}"
 N_TRAJ="${N_TRAJ:-50}"
 EVAL_N_TRAJ="${EVAL_N_TRAJ:-50}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-160}"
@@ -42,7 +42,15 @@ LOG_ROOT="${LOG_ROOT:-results/launch_logs/ablation}"
 
 BASE_RUN="CALIROUTE_${PROBLEM^^}_CUS${CUSTOMERS}_CS${CS}"
 DEFAULT_INIT_RUN="${BASE_RUN}_PPO_SEED${SEED}_E${EPOCHS}_N${NUM_ENVS}_R${ROLLOUT_STEPS}_2080TI"
-INIT_CKPT="${INIT_CKPT:-results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/${DEFAULT_INIT_RUN}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt}"
+LEGACY_INIT_CKPT="../EVRPTW-OFFLINE2ONLINE/results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/O2O_CUS${CUSTOMERS}_PPO_ROUTE_POS_SEED${SEED}_E1500_N128_CHUNK32_EVAL20/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt"
+LOCAL_INIT_CKPT="results/checkpoints/Cus_${CUSTOMERS}_CS_${CS}/${DEFAULT_INIT_RUN}/seed_${SEED}/checkpoint_epoch_$(printf '%04d' "$INIT_EPOCH").pt"
+if [[ -z "${INIT_CKPT:-}" ]]; then
+  if [[ -s "$LEGACY_INIT_CKPT" ]]; then
+    INIT_CKPT="$LEGACY_INIT_CKPT"
+  else
+    INIT_CKPT="$LOCAL_INIT_CKPT"
+  fi
+fi
 
 COMMON_ARGS=(
   --problem "$PROBLEM"

@@ -27,3 +27,23 @@ EPOCHS=300 bash scripts/ablation/server1_expert_budget_incumbent_4gpu.sh
 
 All scripts source `common_ablation.sh`, which controls shared paths, seed,
 2080Ti-safe batch geometry, logging, and GPU-memory monitoring.
+
+The default Cus100 geometry is:
+
+```bash
+NUM_ENVS=24
+N_TRAJ=50
+ROLLOUT_STEPS=160
+PPO_STEP_CHUNK_SIZE=16
+NUM_MINIBATCHES=4
+EVAL_BATCH_SIZE=128
+```
+
+This keeps the largest cell, Server4 `n_traj=100`, under the 11GB 2080Ti
+budget in a one-epoch GPU sanity check. In that check, `NUM_ENVS=64` and
+`NUM_ENVS=32` exceeded the budget for `n_traj=100`, while `NUM_ENVS=24`
+peaked at about 9.1GB above baseline.
+
+By default, the scripts reuse the existing EVRPTW Cus100 PPO epoch-100
+checkpoint from the sibling `EVRPTW-OFFLINE2ONLINE` repository when it exists.
+Set `INIT_CKPT=/path/to/checkpoint_epoch_0100.pt` to override this explicitly.
