@@ -316,6 +316,7 @@ CS=20
 SEED=3009
 EPOCHS=1500
 INIT_EPOCH=100
+INIT_EVAL_INTERVAL=20
 NUM_ENVS=24
 N_TRAJ=50
 EVAL_N_TRAJ=50
@@ -352,8 +353,9 @@ results/checkpoints/Cus_100_CS_20/CALIROUTE_EVRPTW_CUS100_CS20_PPO_INIT_SEED3009
 ```
 
 If no checkpoint exists and the stage is `init`, `ppo`, or `all`, the script
-trains the local initial checkpoint first. If the stage is `offline`, the script
-waits until the checkpoint file appears.
+trains the local initial checkpoint first. Initial PPO training always evaluates
+every 20 epochs. If the stage is `offline`, the script waits until the
+checkpoint file appears.
 
 ## Logs and Monitoring
 

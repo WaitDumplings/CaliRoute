@@ -83,6 +83,7 @@ CS="${CS:-20}"
 SEED="${SEED:-3009}"
 EPOCHS="${EPOCHS:-1500}"
 INIT_EPOCH="${INIT_EPOCH:-100}"
+INIT_EVAL_INTERVAL=20
 NUM_ENVS="${NUM_ENVS:-24}"
 N_TRAJ="${N_TRAJ:-50}"
 EVAL_N_TRAJ="${EVAL_N_TRAJ:-50}"
@@ -267,6 +268,7 @@ run_init_ppo() {
     --offline-method ppo \
     --epochs "$INIT_EPOCH" \
     --ppo-update-epochs 3 \
+    --eval-interval "$INIT_EVAL_INTERVAL" \
     --distance-source road \
     --rdi-embedding none \
     --rdi-encoder-bias on \
