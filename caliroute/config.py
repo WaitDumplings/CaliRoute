@@ -100,6 +100,18 @@ def qkv_delta_flags(mode: str) -> tuple[bool, bool]:
     raise ValueError("qkv delta mode must be one of: none, k, v, kv")
 
 
+def _on_off_or_none(value: str | bool | None) -> bool | None:
+    if value is None:
+        return None
+    return _on(value)
+
+
+def _csv_list(value: str | None) -> list[str]:
+    if value in (None, ""):
+        return []
+    return [part.strip().lower().replace("-", "_") for part in str(value).split(",") if part.strip()]
+
+
 def _clean_none(obj: Any) -> Any:
     if isinstance(obj, dict):
         return {k: _clean_none(v) for k, v in obj.items() if v is not None}
@@ -115,6 +127,11 @@ def _method_offline_config(args: Namespace, train_data: Path) -> tuple[dict[str,
 
     expert_data = _as_path_or_none(args.expert_data) or train_data
     expert_solution = _as_path_or_none(args.expert_solution)
+    if args.expert_checkpoint_s is not None and expert_solution is None:
+        expert_solution = _as_path_or_none(args.expert_time_trace) or _existing_csv(
+            train_data,
+            ("gurobi_time_trace.csv",),
+        )
     if expert_solution is None and preset.requires_expert:
         expert_solution = _existing_csv(train_data, ("expert_solutions.csv", "gurobi_summary.csv"))
     if preset.requires_expert:
@@ -125,6 +142,8 @@ def _method_offline_config(args: Namespace, train_data: Path) -> tuple[dict[str,
             )
         offline_cfg["expert_solution_path"] = str(expert_solution)
         offline_cfg["expert_dataset_path"] = str(expert_data)
+        if args.expert_checkpoint_s is not None:
+            offline_cfg["expert_checkpoint_s"] = float(args.expert_checkpoint_s)
 
     if args.init_checkpoint:
         offline_cfg["init_checkpoint_path"] = str(Path(args.init_checkpoint))
@@ -140,6 +159,23 @@ def _method_offline_config(args: Namespace, train_data: Path) -> tuple[dict[str,
             offline_cfg["sl_coef"] = float(args.sl_coef)
         if args.sl_expert_candidate_weight is not None:
             offline_cfg["sl_expert_candidate_weight"] = float(args.sl_expert_candidate_weight)
+            advantage_cfg["sl_expert_candidate_weight"] = float(args.sl_expert_candidate_weight)
+        group_advantage = _on_off_or_none(args.group_advantage)
+        reference_advantage = _on_off_or_none(args.reference_advantage)
+        memory_incumbent = _on_off_or_none(args.memory_incumbent)
+        sl_candidate = _on_off_or_none(args.sl_candidate)
+        if group_advantage is not None:
+            advantage_cfg["use_group_advantage"] = group_advantage
+        if reference_advantage is not None:
+            advantage_cfg["use_reference_advantage"] = reference_advantage
+        if memory_incumbent is not None:
+            advantage_cfg["sl_use_memory_incumbent"] = memory_incumbent
+            advantage_cfg["sl_candidate_use_memory_incumbent_gate"] = memory_incumbent
+            if not memory_incumbent:
+                advantage_cfg["use_reference_memory_gate"] = False
+        if sl_candidate is not None:
+            advantage_cfg["use_expert_solution_level"] = sl_candidate
+            advantage_cfg["sl_use_expert_candidate"] = sl_candidate
 
     if args.bc_coef is not None:
         offline_cfg["bc_coef"] = float(args.bc_coef)
@@ -172,9 +208,22 @@ def build_training_config(args: Namespace) -> dict[str, Any]:
     eval_max_steps = int(args.eval_max_steps or rollout_steps)
     ppo_update_epochs = int(args.ppo_update_epochs or method_preset(method).ppo_update_epochs)
     delta_k, delta_v = qkv_delta_flags(args.qkv_delta)
-    distance_injection = str(args.distance_injection).strip().lower()
-    if distance_injection not in {"encoder", "none"}:
-        raise ValueError("distance injection currently supports encoder or none; embedding is reserved for the next ablation hook")
+    distance_source = str(args.distance_source).strip().lower()
+    rdi_embedding = str(args.rdi_embedding).strip().lower().replace("-", "_")
+    encoder_bias = _on(args.rdi_encoder_bias)
+    encoder_norm = str(args.rdi_encoder_norm).strip().lower().replace("-", "_")
+    if args.distance_injection is not None:
+        legacy_distance = str(args.distance_injection).strip().lower()
+        encoder_bias = legacy_distance == "encoder"
+    if distance_source == "none" and (rdi_embedding != "none" or encoder_bias or encoder_norm == "sinkhorn"):
+        raise ValueError("distance_source=none can only be used when RDI embedding/bias/sinkhorn are all disabled")
+    if rdi_embedding not in {"none", "svd"}:
+        raise ValueError("rdi_embedding must be one of: none, svd")
+    if encoder_norm not in {"softmax", "sinkhorn"}:
+        raise ValueError("rdi_encoder_norm must be one of: softmax, sinkhorn")
+    svd_feature_dim = args.svd_feature_dim
+    if svd_feature_dim is None:
+        svd_feature_dim = int(args.embedding_dim)
 
     eval_summary = _as_path_or_none(args.gurobi_summary)
     if eval_summary is None:
@@ -217,8 +266,17 @@ def build_training_config(args: Namespace) -> dict[str, Any]:
             "dynamic_decision_delta_v": delta_v,
             "dynamic_decision_delta_action_key": _on(args.action_key),
             "dynamic_decision_action_bias": _on(args.action_bias),
-            "distance_injection": distance_injection,
-            "use_encoder_distance_bias": distance_injection == "encoder",
+            "dynamic_decision_feature_drop_groups": _csv_list(args.agda_drop_groups),
+            "distance_source": distance_source,
+            "rdi_embedding": rdi_embedding,
+            "use_svd_distance_embedding": rdi_embedding == "svd",
+            "rdi_svd_rank": int(args.svd_rank),
+            "rdi_svd_feature_dim": int(svd_feature_dim),
+            "rdi_encoder_norm": encoder_norm,
+            "encoder_attention_norm": encoder_norm,
+            "rdi_sinkhorn_iters": int(args.sinkhorn_iters),
+            "use_encoder_distance_bias": bool(encoder_bias),
+            "distance_injection": "encoder" if encoder_bias else "none",
         },
         "critic": {
             "use_decomposed_critic": False,

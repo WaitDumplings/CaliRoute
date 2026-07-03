@@ -51,12 +51,16 @@ class MultiHeadAttentionLayer(nn.Module):
         n_heads: int,
         embedding_dim: int,
         feed_forward_hidden: int = 512,
+        attn_norm: str = "softmax",
+        sinkhorn_iters: int = 10,
     ):
         super().__init__()
 
         self.attn = MultiHeadAttentionProj(
             embedding_dim=embedding_dim,
             n_heads=n_heads,
+            attn_norm=attn_norm,
+            sinkhorn_iters=sinkhorn_iters,
         )
 
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -95,6 +99,8 @@ class GraphAttentionEncoder(nn.Module):
         embed_dim: int,
         n_layers: int,
         feed_forward_hidden: int = 512,
+        attn_norm: str = "softmax",
+        sinkhorn_iters: int = 10,
     ):
         super().__init__()
 
@@ -109,6 +115,8 @@ class GraphAttentionEncoder(nn.Module):
                     n_heads=n_heads,
                     embedding_dim=embed_dim,
                     feed_forward_hidden=feed_forward_hidden,
+                    attn_norm=attn_norm,
+                    sinkhorn_iters=sinkhorn_iters,
                 )
                 for _ in range(n_layers)
             ]

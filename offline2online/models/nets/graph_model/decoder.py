@@ -162,6 +162,7 @@ class DynamicGraphKVEncoder(nn.Module):
         enable_delta_v=True,
         enable_delta_action_key=True,
         enable_action_bias=True,
+        feature_drop_groups=None,
     ):
         super().__init__()
         self.embedding_dim = int(embedding_dim)
@@ -170,6 +171,20 @@ class DynamicGraphKVEncoder(nn.Module):
         self.enable_delta_v = bool(enable_delta_v)
         self.enable_delta_action_key = bool(enable_delta_action_key)
         self.enable_action_bias = bool(enable_action_bias)
+        if feature_drop_groups is None:
+            self.feature_drop_groups = set()
+        elif isinstance(feature_drop_groups, str):
+            self.feature_drop_groups = {
+                part.strip().lower().replace("-", "_")
+                for part in feature_drop_groups.split(",")
+                if part.strip()
+            }
+        else:
+            self.feature_drop_groups = {
+                str(part).strip().lower().replace("-", "_")
+                for part in feature_drop_groups
+                if str(part).strip()
+            }
         self.routing_system_feature_dim = 10
         self.problem_system_feature_dim = 5
         self.system_feature_dim = (
@@ -655,6 +670,15 @@ class DynamicGraphKVEncoder(nn.Module):
             ],
             dim=-1,
         )
+        if "distance" in self.feature_drop_groups or "road_distance" in self.feature_drop_groups:
+            routing_core = routing_core.clone()
+            routing_core[..., [12, 13, 14]] = 0.0
+        if "capacity" in self.feature_drop_groups or "load" in self.feature_drop_groups:
+            constraint_supplement = constraint_supplement.clone()
+            constraint_supplement[..., [0, 1, 2]] = 0.0
+        if "battery" in self.feature_drop_groups or "soc" in self.feature_drop_groups:
+            constraint_supplement = constraint_supplement.clone()
+            constraint_supplement[..., [3, 8, 9, 10]] = 0.0
         return torch.cat([routing_core, constraint_supplement], dim=-1)
 
     def forward(
@@ -845,6 +869,7 @@ class Decoder(nn.Module):
         dynamic_decision_delta_v=True,
         dynamic_decision_delta_action_key=True,
         dynamic_decision_action_bias=True,
+        dynamic_decision_feature_drop_groups=None,
     ):
         super().__init__()
 
@@ -873,6 +898,7 @@ class Decoder(nn.Module):
             enable_delta_v=dynamic_decision_delta_v,
             enable_delta_action_key=dynamic_decision_delta_action_key,
             enable_action_bias=dynamic_decision_action_bias,
+            feature_drop_groups=dynamic_decision_feature_drop_groups,
         )
 
         # glimpse + pointer

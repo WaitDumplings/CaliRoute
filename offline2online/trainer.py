@@ -522,13 +522,26 @@ def _nearest_neighbor_route(customers: Sequence[int], dist: np.ndarray, start: i
     return order
 
 
-def _load_reference_metrics(path: str | Path | None) -> dict[str, dict[str, float]]:
+def _load_reference_metrics(
+    path: str | Path | None,
+    *,
+    checkpoint_s: float | None = None,
+    checkpoint_tolerance_s: float = 1e-3,
+) -> dict[str, dict[str, float]]:
     ref_path = _resolve_path(path)
     if ref_path is None or not ref_path.exists():
         return {}
     out: dict[str, dict[str, float]] = {}
+    checkpoint_value = None if checkpoint_s is None else float(checkpoint_s)
     with ref_path.open("r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            if checkpoint_value is not None:
+                try:
+                    row_checkpoint = float(row.get("checkpoint_s", "nan"))
+                except (TypeError, ValueError):
+                    continue
+                if abs(row_checkpoint - checkpoint_value) > float(checkpoint_tolerance_s):
+                    continue
             instance_id = str(row.get("instance_id", ""))
             if not instance_id:
                 continue
@@ -917,6 +930,16 @@ def _load_agent_checkpoint(
     else:
         state_dict = checkpoint
         checkpoint = {}
+    skipped_shape_keys: list[str] = []
+    if not strict:
+        current = agent.state_dict()
+        filtered = {}
+        for key, value in state_dict.items():
+            if key in current and torch.is_tensor(value) and tuple(value.shape) != tuple(current[key].shape):
+                skipped_shape_keys.append(key)
+                continue
+            filtered[key] = value
+        state_dict = filtered
     result = agent.load_state_dict(state_dict, strict=strict)
     return {
         "checkpoint_path": str(ckpt_path),
@@ -924,6 +947,7 @@ def _load_agent_checkpoint(
         "seed": checkpoint.get("seed") if isinstance(checkpoint, dict) else None,
         "missing_keys": list(getattr(result, "missing_keys", [])),
         "unexpected_keys": list(getattr(result, "unexpected_keys", [])),
+        "skipped_shape_keys": skipped_shape_keys,
     }
 
 
@@ -951,6 +975,16 @@ def _load_training_checkpoint(
     else:
         state_dict = checkpoint
         checkpoint = {}
+    skipped_shape_keys: list[str] = []
+    if not strict:
+        current = agent.state_dict()
+        filtered = {}
+        for key, value in state_dict.items():
+            if key in current and torch.is_tensor(value) and tuple(value.shape) != tuple(current[key].shape):
+                skipped_shape_keys.append(key)
+                continue
+            filtered[key] = value
+        state_dict = filtered
     result = agent.load_state_dict(state_dict, strict=strict)
     optimizer_loaded = False
     if isinstance(checkpoint, dict) and checkpoint.get("optimizer_state_dict") is not None:
@@ -968,6 +1002,7 @@ def _load_training_checkpoint(
         "optimizer_loaded": optimizer_loaded,
         "missing_keys": list(getattr(result, "missing_keys", [])),
         "unexpected_keys": list(getattr(result, "unexpected_keys", [])),
+        "skipped_shape_keys": skipped_shape_keys,
     }
 
 
@@ -3597,13 +3632,26 @@ def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, deb
     if not dataset_path:
         raise ValueError("offline expert loading requires data.train_dataset_path or offline.expert_dataset_path")
     problem_type = problem_type_from_config(cfg)
+    num_customers = int(data_cfg.get("num_customers", 5))
+    num_cs = num_charging_stations_for_problem(data_cfg, problem_type)
     records = load_solver_expert_records(
         dataset_path=dataset_path,
         solution_csv_path=solution_path,
-        num_customers=int(data_cfg.get("num_customers", 5)),
-        num_charging_stations=num_charging_stations_for_problem(data_cfg, problem_type),
+        num_customers=num_customers,
+        num_charging_stations=num_cs,
         limit=offline_cfg.get("expert_limit"),
         problem_type=problem_type,
+        checkpoint_s=offline_cfg.get("expert_checkpoint_s"),
+        checkpoint_tolerance_s=float(offline_cfg.get("expert_checkpoint_tolerance_s", 1e-3)),
+    )
+    dataset_count = sum(
+        1
+        for _ in iter_adapted_instances(
+            dataset_path,
+            num_customers=num_customers,
+            num_charging_stations=num_cs,
+            problem_type=problem_type,
+        )
     )
     trajectories, stats = build_expert_trajectories(
         records,
@@ -3612,11 +3660,17 @@ def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, deb
         strict=bool(offline_cfg.get("strict_replay", True)),
         seed=seed + int(offline_cfg.get("replay_seed_offset", 17_000)),
     )
+    stats["expert_checkpoint_s"] = float(offline_cfg["expert_checkpoint_s"]) if offline_cfg.get("expert_checkpoint_s") is not None else ""
+    stats["expert_reference_records"] = int(len(records))
+    stats["expert_dataset_instances"] = int(dataset_count)
+    stats["expert_reference_coverage"] = float(len(trajectories) / max(dataset_count, 1))
     _debug_log(
         debug_enabled,
         debug_file,
         "[OfflineArchive] "
         f"method={method} records={stats['records_seen']} trajectories={stats['trajectories']} "
+        f"coverage={stats['expert_reference_coverage']:.6f} "
+        f"checkpoint_s={stats['expert_checkpoint_s']} "
         f"invalid={stats['invalid_records']} steps={stats['steps']} "
         f"avg_steps={stats['avg_steps_per_route']:.3f} "
         f"success_rate={stats.get('expert_replay_success_rate', 0.0):.6f} "
@@ -3782,19 +3836,20 @@ def train_from_config(
         )
     )
     distance_injection = str(model_cfg.get("distance_injection", "encoder")).strip().lower().replace("-", "_")
-    if distance_injection in {"encoder", "encoder_bias", "road_encoder"}:
+    if "use_encoder_distance_bias" in model_cfg:
+        use_encoder_distance_bias = bool(model_cfg["use_encoder_distance_bias"])
+    elif distance_injection in {"encoder", "encoder_bias", "road_encoder"}:
         use_encoder_distance_bias = True
     elif distance_injection in {"none", "off", "no"}:
         use_encoder_distance_bias = False
-    elif distance_injection in {"embedding", "both"}:
-        raise ValueError(
-            "model.distance_injection='embedding' is reserved for a future embedding-level "
-            "implementation; current supported values are 'encoder' and 'none'."
-        )
     else:
-        raise ValueError("model.distance_injection must be one of: encoder, none")
-    if "use_encoder_distance_bias" in model_cfg:
-        use_encoder_distance_bias = bool(model_cfg["use_encoder_distance_bias"])
+        raise ValueError("model.distance_injection must be one of: encoder, none when use_encoder_distance_bias is unset")
+    distance_source = str(model_cfg.get("distance_source", "road")).strip().lower().replace("-", "_")
+    encoder_attention_norm = str(
+        model_cfg.get("encoder_attention_norm", model_cfg.get("rdi_encoder_norm", "softmax"))
+    ).strip().lower().replace("-", "_")
+    if encoder_attention_norm not in {"softmax", "sinkhorn"}:
+        raise ValueError("model.encoder_attention_norm must be one of: softmax, sinkhorn")
 
     def _make_agent() -> Agent:
         return Agent(
@@ -3812,6 +3867,13 @@ def train_from_config(
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
+            distance_source=distance_source,
+            use_svd_distance_embedding=bool(model_cfg.get("use_svd_distance_embedding", False)),
+            rdi_svd_rank=int(model_cfg.get("rdi_svd_rank", 10)),
+            rdi_svd_feature_dim=int(model_cfg.get("rdi_svd_feature_dim", model_cfg.get("embedding_dim", 256))),
+            encoder_attention_norm=encoder_attention_norm,
+            rdi_sinkhorn_iters=int(model_cfg.get("rdi_sinkhorn_iters", model_cfg.get("sinkhorn_iters", 10))),
+            dynamic_decision_feature_drop_groups=model_cfg.get("dynamic_decision_feature_drop_groups", ()),
             use_decomposed_critic=use_decomposed_critic,
         ).to(device)
 
@@ -3941,7 +4003,11 @@ def train_from_config(
             problem_type=problem_type,
         )
         _configure_dataset_reward_scale(cfg, base_pool)
-        references = _load_reference_metrics(offline_cfg.get("expert_solution_path") or offline_cfg.get("expert_csv_path"))
+        references = _load_reference_metrics(
+            offline_cfg.get("expert_solution_path") or offline_cfg.get("expert_csv_path"),
+            checkpoint_s=offline_cfg.get("expert_checkpoint_s"),
+            checkpoint_tolerance_s=float(offline_cfg.get("expert_checkpoint_tolerance_s", 1e-3)),
+        )
         if not references:
             raise ValueError("solution priority sampler requires offline.expert_solution_path with objective/vehicle references")
         pool = SolutionPrioritySampler(
@@ -4044,6 +4110,10 @@ def train_from_config(
         "route_boundary_step_ratio",
         "expert_replay_success_rate",
         "expert_action_valid_ratio",
+        "expert_checkpoint_s",
+        "expert_reference_records",
+        "expert_dataset_instances",
+        "expert_reference_coverage",
         "expert_env_replay_obj_error_mean",
         "expert_env_replay_obj_error_max",
         "expert_route_count_mean",
@@ -4474,6 +4544,10 @@ def train_from_config(
             f"use_graph_token={model_cfg.get('use_graph_token', True)} "
             f"use_dynamic_decision_encoder={model_cfg.get('use_dynamic_decision_encoder', False)} "
             f"dde_flags=k{int(dynamic_decision_delta_k)}_v{int(dynamic_decision_delta_v)}_ak{int(dynamic_decision_delta_action_key)}_bias{int(dynamic_decision_action_bias)} "
+            f"agda_drop_groups={model_cfg.get('dynamic_decision_feature_drop_groups', [])} "
+            f"distance_source={distance_source} "
+            f"svd_embedding={int(bool(model_cfg.get('use_svd_distance_embedding', False)))} "
+            f"encoder_norm={encoder_attention_norm} "
             f"encoder_distance_bias={int(use_encoder_distance_bias)} "
             f"use_decomposed_critic={use_decomposed_critic} "
             f"advantage_mode={advantage_mode_name} "
@@ -4498,8 +4572,10 @@ def train_from_config(
                 f"reference_epoch={reference_checkpoint_info.get('epoch', '')} "
                 f"init_missing={len(init_checkpoint_info.get('missing_keys', [])) if init_checkpoint_info else 0} "
                 f"init_unexpected={len(init_checkpoint_info.get('unexpected_keys', [])) if init_checkpoint_info else 0} "
+                f"init_skipped_shape={len(init_checkpoint_info.get('skipped_shape_keys', [])) if init_checkpoint_info else 0} "
                 f"ref_missing={len(reference_checkpoint_info.get('missing_keys', [])) if reference_checkpoint_info else 0} "
-                f"ref_unexpected={len(reference_checkpoint_info.get('unexpected_keys', [])) if reference_checkpoint_info else 0}",
+                f"ref_unexpected={len(reference_checkpoint_info.get('unexpected_keys', [])) if reference_checkpoint_info else 0} "
+                f"ref_skipped_shape={len(reference_checkpoint_info.get('skipped_shape_keys', [])) if reference_checkpoint_info else 0}",
             )
         if resume_checkpoint_info:
             _debug_log(
@@ -4514,7 +4590,8 @@ def train_from_config(
                 f"truncate_logs={int(resume_truncate_logs)} "
                 f"sample_offset={sample_count_offset} "
                 f"missing={len(resume_checkpoint_info.get('missing_keys', []))} "
-                f"unexpected={len(resume_checkpoint_info.get('unexpected_keys', []))}",
+                f"unexpected={len(resume_checkpoint_info.get('unexpected_keys', []))} "
+                f"skipped_shape={len(resume_checkpoint_info.get('skipped_shape_keys', []))}",
             )
         for epoch in range(resume_start_epoch, epochs + 1):
             epoch_start = time.perf_counter()
@@ -5490,6 +5567,10 @@ def train_from_config(
                     "bc_action_accuracy": bc_info.get("bc_action_accuracy", ""),
                     "bc_entropy": bc_info.get("bc_entropy", ""),
                     "bc_coef": bc_info.get("bc_coef", ""),
+                    "expert_checkpoint_s": expert_stats.get("expert_checkpoint_s", ""),
+                    "expert_reference_records": expert_stats.get("expert_reference_records", ""),
+                    "expert_dataset_instances": expert_stats.get("expert_dataset_instances", ""),
+                    "expert_reference_coverage": expert_stats.get("expert_reference_coverage", ""),
                     "partition_loss": bc_info.get("partition_loss", ""),
                     "partition_accuracy": bc_info.get("partition_accuracy", ""),
                     "partition_pos_accuracy": bc_info.get("partition_pos_accuracy", ""),

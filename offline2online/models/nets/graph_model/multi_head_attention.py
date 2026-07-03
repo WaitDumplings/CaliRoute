@@ -3,6 +3,18 @@ import math
 import torch
 from torch import nn
 
+
+def sinkhorn_attention(scores, iters: int = 10, eps: float = 1e-9):
+    """Doubly-normalize attention scores over query/key axes."""
+    finite = torch.isfinite(scores)
+    masked = torch.where(finite, scores, torch.full_like(scores, -1e9))
+    shifted = masked - masked.amax(dim=-1, keepdim=True).detach()
+    attn = torch.exp(shifted).masked_fill(~finite, 0.0)
+    for _ in range(max(1, int(iters))):
+        attn = attn / attn.sum(dim=-2, keepdim=True).clamp_min(eps)
+        attn = attn / attn.sum(dim=-1, keepdim=True).clamp_min(eps)
+    return attn
+
 ################################ Decoder Attention ################################
 class AttentionScore(nn.Module):
     def __init__(self, use_tanh=True, C=10.0, learn_scale=True, learn_C=False):
@@ -157,9 +169,11 @@ class MultiHeadAttentionEncoder(nn.Module):
         mask:  [B, Nk] (bool)
         attn_bias: optional [B, Nq, Nk] (broadcast-safe)
     """
-    def __init__(self, embedding_dim, n_heads=8):
+    def __init__(self, embedding_dim, n_heads=8, attn_norm: str = "softmax", sinkhorn_iters: int = 10):
         super().__init__()
         self.n_heads = n_heads
+        self.attn_norm = str(attn_norm).strip().lower()
+        self.sinkhorn_iters = int(sinkhorn_iters)
         self.attentionScore = Vanilla_AttentionScore()
         self.project_out = nn.Linear(embedding_dim, embedding_dim, bias=False)
 
@@ -176,7 +190,10 @@ class MultiHeadAttentionEncoder(nn.Module):
             attn_bias=attn_bias
         )  # [H,B,Nq,Nk]
 
-        attn = torch.softmax(compatibility, dim=-1)
+        if self.attn_norm == "sinkhorn":
+            attn = sinkhorn_attention(compatibility, iters=self.sinkhorn_iters)
+        else:
+            attn = torch.softmax(compatibility, dim=-1)
 
         # Weighted sum of value vectors
         out_heads = torch.matmul(attn, value_heads)  # [H,B,Nq,D_head]
@@ -207,12 +224,17 @@ class MultiHeadAttentionProj(nn.Module):
         mask: [B, Nk] (bool)
         attn_bias: Optional attention bias, e.g. [B, Nq, Nk]
     """
-    def __init__(self, embedding_dim, n_heads=8):
+    def __init__(self, embedding_dim, n_heads=8, attn_norm: str = "softmax", sinkhorn_iters: int = 10):
         super().__init__()
         self.queryEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.keyEncoder   = nn.Linear(embedding_dim, embedding_dim, bias=False)
         self.valueEncoder = nn.Linear(embedding_dim, embedding_dim, bias=False)
-        self.MHA = MultiHeadAttentionEncoder(embedding_dim, n_heads)
+        self.MHA = MultiHeadAttentionEncoder(
+            embedding_dim,
+            n_heads,
+            attn_norm=attn_norm,
+            sinkhorn_iters=sinkhorn_iters,
+        )
 
     def forward(self, q, h=None, mask=None, attn_bias=None):
         if h is None:

@@ -144,6 +144,7 @@ class StateWrapper:
             "time_window": time_window,
             "demand": demand,
             "service_time": service_time,
+            "edge_distance": self.states["edge_distance"].float(),
         }
         self.states["observations"] = observations
         self.VEHICLE_CAPACITY = self.states["loading_capacity"]
@@ -184,17 +185,35 @@ class Backbone(nn.Module):
         dynamic_decision_delta_action_key: bool = True,
         dynamic_decision_action_bias: bool = True,
         use_encoder_distance_bias: bool = True,
+        distance_source: str = "road",
+        use_svd_distance_embedding: bool = False,
+        rdi_svd_rank: int = 10,
+        rdi_svd_feature_dim: int | None = None,
+        encoder_attention_norm: str = "softmax",
+        rdi_sinkhorn_iters: int = 10,
+        dynamic_decision_feature_drop_groups: list[str] | tuple[str, ...] | str | None = None,
     ):
         super().__init__()
         del use_graph_token  # graph token is intrinsic to the migrated graph encoder.
         self.device = device
         self.problem = Problem(problem_name)
         self.use_encoder_distance_bias = bool(use_encoder_distance_bias)
-        self.embedding = AutoEmbedding(self.problem.NAME, {"embedding_dim": embedding_dim})
+        self.distance_source = str(distance_source).strip().lower().replace("-", "_")
+        self.embedding = AutoEmbedding(
+            self.problem.NAME,
+            {
+                "embedding_dim": embedding_dim,
+                "use_svd_distance_embedding": use_svd_distance_embedding,
+                "rdi_svd_rank": rdi_svd_rank,
+                "rdi_svd_feature_dim": rdi_svd_feature_dim,
+            },
+        )
         self.encoder = GraphAttentionEncoder(
             n_heads=n_heads,
             embed_dim=embedding_dim,
             n_layers=n_encode_layers,
+            attn_norm=encoder_attention_norm,
+            sinkhorn_iters=rdi_sinkhorn_iters,
         )
         self.decoder = Decoder(
             embedding_dim=embedding_dim,
@@ -208,6 +227,7 @@ class Backbone(nn.Module):
             dynamic_decision_delta_v=dynamic_decision_delta_v,
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
+            dynamic_decision_feature_drop_groups=dynamic_decision_feature_drop_groups,
         )
 
         self.dist_bias_scale = nn.Parameter(torch.tensor(1.0))
@@ -225,22 +245,45 @@ class Backbone(nn.Module):
         station_type = torch.ones(batch_size, n_rs, dtype=torch.long, device=device)
         return torch.cat([depot_type, customer_type, station_type], dim=1)
 
-    def _build_distance_matrix(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
+    def _build_euclidean_distance_matrix(self, node_inputs: dict[str, torch.Tensor]) -> torch.Tensor:
         depot_loc = node_inputs["depot_loc"]
         if depot_loc.dim() == 2:
             depot_loc = depot_loc.unsqueeze(1)
         nodes = torch.cat([depot_loc, node_inputs["cus_loc"], node_inputs["rs_loc"]], dim=1)
         return torch.cdist(nodes, nodes, p=2)
 
-    def _build_attn_bias(self, state: StateWrapper) -> torch.Tensor:
+    def _rdi_distance_matrix(self, state: StateWrapper) -> torch.Tensor | None:
         node_inputs = state.observations
+        if self.distance_source in {"none", "off", "no"}:
+            return None
+        if self.distance_source in {"euclidean", "coord", "coordinate"}:
+            return self._build_euclidean_distance_matrix(node_inputs)
+        if self.distance_source not in {"road", "graph", "edge"}:
+            raise ValueError("distance_source must be one of: road, euclidean, none")
         dist_mat = state.states.get("edge_distance")
         if dist_mat is None:
-            dist_mat = self._build_distance_matrix(node_inputs)
-        else:
+            raise KeyError("distance_source=road requires edge_distance in observations")
+        dist_mat = dist_mat.to(device=node_inputs["cus_loc"].device, dtype=node_inputs["cus_loc"].dtype)
+        if dist_mat.dim() == 2:
+            dist_mat = dist_mat.unsqueeze(0)
+        return dist_mat
+
+    def _build_attn_bias(self, state: StateWrapper, dist_mat: torch.Tensor | None) -> torch.Tensor:
+        node_inputs = state.observations
+        if dist_mat is not None:
             dist_mat = dist_mat.to(device=node_inputs["cus_loc"].device, dtype=node_inputs["cus_loc"].dtype)
             if dist_mat.dim() == 2:
                 dist_mat = dist_mat.unsqueeze(0)
+        else:
+            expected_nodes = 1 + node_inputs["cus_loc"].size(1) + node_inputs["rs_loc"].size(1)
+            batch_size = node_inputs["cus_loc"].size(0)
+            dist_mat = torch.zeros(
+                batch_size,
+                expected_nodes,
+                expected_nodes,
+                device=node_inputs["cus_loc"].device,
+                dtype=node_inputs["cus_loc"].dtype,
+            )
         node_type = self._build_node_type(node_inputs)
         dist_bias = -self.dist_bias_scale * dist_mat if self.use_encoder_distance_bias else torch.zeros_like(dist_mat)
         pair_id = node_type.unsqueeze(2) * 3 + node_type.unsqueeze(1)
@@ -276,11 +319,15 @@ class Backbone(nn.Module):
         node_mask = state.states.get("instance_mask") if use_mask else None
         if node_mask is not None:
             node_mask = node_mask.bool()
-        node_embeddings = self.embedding(state.observations)
+        rdi_dist = self._rdi_distance_matrix(state)
+        node_inputs = dict(state.observations)
+        if rdi_dist is not None:
+            node_inputs["rdi_distance_matrix"] = rdi_dist
+        node_embeddings = self.embedding(node_inputs)
         encoded_nodes = self.encoder(
             node_embeddings,
             mask=None,
-            attn_bias=self._build_attn_bias(state),
+            attn_bias=self._build_attn_bias(state, rdi_dist),
         )
         return self.decoder._precompute(encoded_nodes, mask=node_mask), node_mask
 
@@ -345,6 +392,13 @@ class Agent(nn.Module):
         dynamic_decision_delta_action_key: bool = True,
         dynamic_decision_action_bias: bool = True,
         use_encoder_distance_bias: bool = True,
+        distance_source: str = "road",
+        use_svd_distance_embedding: bool = False,
+        rdi_svd_rank: int = 10,
+        rdi_svd_feature_dim: int | None = None,
+        encoder_attention_norm: str = "softmax",
+        rdi_sinkhorn_iters: int = 10,
+        dynamic_decision_feature_drop_groups: list[str] | tuple[str, ...] | str | None = None,
         use_decomposed_critic: bool = False,
     ):
         super().__init__()
@@ -363,6 +417,13 @@ class Agent(nn.Module):
             dynamic_decision_delta_action_key=dynamic_decision_delta_action_key,
             dynamic_decision_action_bias=dynamic_decision_action_bias,
             use_encoder_distance_bias=use_encoder_distance_bias,
+            distance_source=distance_source,
+            use_svd_distance_embedding=use_svd_distance_embedding,
+            rdi_svd_rank=rdi_svd_rank,
+            rdi_svd_feature_dim=rdi_svd_feature_dim,
+            encoder_attention_norm=encoder_attention_norm,
+            rdi_sinkhorn_iters=rdi_sinkhorn_iters,
+            dynamic_decision_feature_drop_groups=dynamic_decision_feature_drop_groups,
         )
         self.actor = Actor()
         self.critic = Critic(hidden_size=embedding_dim, use_decomposed_critic=use_decomposed_critic)

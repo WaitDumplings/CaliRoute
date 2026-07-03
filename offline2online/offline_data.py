@@ -148,6 +148,8 @@ def load_solver_expert_records(
     num_charging_stations: int,
     limit: int | None = None,
     problem_type: str | None = None,
+    checkpoint_s: float | None = None,
+    checkpoint_tolerance_s: float = 1e-3,
 ) -> list[ExpertRecord]:
     dataset_root = resolve_repo_path(dataset_path)
     solution_path = Path(solution_csv_path)
@@ -163,8 +165,16 @@ def load_solver_expert_records(
         )
     }
     best_by_instance: dict[str, ExpertRecord] = {}
+    checkpoint_value = None if checkpoint_s is None else float(checkpoint_s)
     with solution_path.open("r", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
+            if checkpoint_value is not None:
+                try:
+                    row_checkpoint = float(row.get("checkpoint_s", "nan"))
+                except (TypeError, ValueError):
+                    continue
+                if abs(row_checkpoint - checkpoint_value) > float(checkpoint_tolerance_s):
+                    continue
             if not _is_usable_solution(row):
                 continue
             instance_id = row.get("instance_id", "")
