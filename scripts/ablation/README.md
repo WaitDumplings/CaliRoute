@@ -47,3 +47,18 @@ peaked at about 9.1GB above baseline.
 By default, the scripts reuse the existing EVRPTW Cus100 PPO epoch-100
 checkpoint from the sibling `EVRPTW-OFFLINE2ONLINE` repository when it exists.
 Set `INIT_CKPT=/path/to/checkpoint_epoch_0100.pt` to override this explicitly.
+
+## Values Reused Rather Than Re-run
+
+The scripts only launch the 33 new ablation jobs from the specification. These
+table cells should be filled from existing rows:
+
+- AGDA `neither`: reuse Server2 `encoder_bias_only`.
+- Progressive `RDI off, AGDA off, PPO`: reuse Server2 `base`.
+- Progressive `RDI on, AGDA off, PPO`: reuse Server2 `encoder_bias_only`.
+- Progressive `RDI on, AGDA on, PPO`: reuse Server3 `agda_action_key_only`
+  or the main-result PPO row.
+- Progressive `RDI on, AGDA on, SL-PPO`: reuse the main-result SL-PPO row.
+- SL-PPO advantage `both`: reuse the main-result SL-PPO row.
+- AGDA feature-group full/no-removal: reuse Server3 `agda_action_key_only`.
+- `n_traj` main K value: reuse the main-result SL-PPO row.
