@@ -130,20 +130,22 @@ shared PPO init checkpoint.
 
 ```bash
 cd /data/Maojie/CaliRoute
-bash scripts/ablation/server2_rdi_4gpu.sh ppo
+bash scripts/ablation/server2_rdi_4gpu.sh 0,1,2,3 all
 ```
 
-The shell is driven by one distance option and, for graph distance, three
-true/false injection switches:
+The preferred interface is positional:
 
 ```bash
-RDI_OPTION=base|euclidean|graph
-RDI_EMBEDDING_SVD=true|false
-RDI_ENCODER_SINKHORN=true|false
-RDI_ENCODER_BIAS=true|false
+bash scripts/ablation/server2_rdi_4gpu.sh GPU_ID RDI_OPTION RDI_EMBEDDING RDI_ENCODER_SINKHORN RDI_ENCODER_BIAS
 ```
 
-The default `RDI_OPTION=all` expands to these rows:
+- `GPU_ID`: one GPU id such as `2`, or a comma list such as `0,1,2,3`.
+- `RDI_OPTION`: `all`, `base`, `euclidean`, or `graph`.
+- `RDI_EMBEDDING`: `true` enables SVD embedding; `false` disables it.
+- For `graph`, the three switches are `true|false`; at least one must be `true`.
+- For `base` and `euclidean`, the switch arguments can be omitted or left `false`.
+
+`RDI_OPTION=all` expands to these rows:
 
 | Tag | Distance option | Embedding SVD | Encoder Sinkhorn | Encoder bias | Method |
 | --- | --- | --- | --- | --- | --- |
@@ -156,12 +158,16 @@ The default `RDI_OPTION=all` expands to these rows:
 | `s2_embedding_svd_encoder_bias` | graph | true | false | true | PPO |
 | `s2_embedding_svd_encoder_sinkhorn_encoder_bias` | graph | true | true | true | PPO |
 
-To run a single graph row for debugging:
+To run one row:
 
 ```bash
-RDI_OPTION=graph RDI_EMBEDDING_SVD=true RDI_ENCODER_SINKHORN=false RDI_ENCODER_BIAS=true \
-  bash scripts/ablation/server2_rdi_4gpu.sh ppo
+bash scripts/ablation/server2_rdi_4gpu.sh 0 base false false false
+bash scripts/ablation/server2_rdi_4gpu.sh 1 euclidean false false false
+bash scripts/ablation/server2_rdi_4gpu.sh 2 graph true false true
 ```
+
+The old stage/env interface still works for compatibility, for example
+`RDI_OPTION=graph RDI_EMBEDDING_SVD=true RDI_ENCODER_BIAS=true bash scripts/ablation/server2_rdi_4gpu.sh ppo`.
 
 This script also writes one nearest-neighbor diagnostic row per training run:
 

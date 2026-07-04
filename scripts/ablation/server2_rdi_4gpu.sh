@@ -4,21 +4,74 @@ set -euo pipefail
 SCRIPT_TAG="server2_rdi"
 GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0,1,2,3}"
 
-# RDI option model:
-#   RDI_OPTION=all       launches the 8 rows required by Section 5.3.
-#   RDI_OPTION=base      no distance injection.
-#   RDI_OPTION=euclidean injects Euclidean distance through the encoder-bias slot.
-#   RDI_OPTION=graph     uses road-network distance; choose the switches below.
-# For RDI_OPTION=graph, the three switches are true/false knobs:
-#   RDI_EMBEDDING_SVD=true|false
-#   RDI_ENCODER_SINKHORN=true|false
-#   RDI_ENCODER_BIAS=true|false
+print_server2_rdi_usage() {
+  cat <<EOF
+Usage:
+  bash scripts/ablation/server2_rdi_4gpu.sh GPU_ID {all|base|euclidean|graph} [RDI_EMBEDDING] [RDI_ENCODER_SINKHORN] [RDI_ENCODER_BIAS] [--detach|--foreground|--no-detach]
+  bash scripts/ablation/server2_rdi_4gpu.sh [init|ppo|offline|all] [--detach|--foreground|--no-detach]
+
+Examples:
+  bash scripts/ablation/server2_rdi_4gpu.sh 0,1,2,3 all
+  bash scripts/ablation/server2_rdi_4gpu.sh 0 base false false false
+  bash scripts/ablation/server2_rdi_4gpu.sh 1 euclidean false false false
+  bash scripts/ablation/server2_rdi_4gpu.sh 2 graph true false true
+  bash scripts/ablation/server2_rdi_4gpu.sh 2 graph true false true --foreground
+
+Notes:
+  GPU_ID can be one GPU id, such as 2, or a comma list, such as 0,1,2,3.
+  RDI_OPTION=all launches the 8 Section 5.3 RDI rows.
+  RDI_OPTION=base runs no distance injection.
+  RDI_OPTION=euclidean injects Euclidean distance through the encoder-bias slot.
+  RDI_EMBEDDING=true enables SVD embedding; false disables it.
+  RDI_OPTION=graph uses road-network distance and requires at least one true switch.
+EOF
+}
+
+# RDI option defaults. The preferred interface is positional:
+#   bash server2_rdi_4gpu.sh GPU_ID RDI_OPTION RDI_EMBEDDING RDI_ENCODER_SINKHORN RDI_ENCODER_BIAS
+# The old stage/env interface is still accepted for compatibility.
 RDI_OPTION="${RDI_OPTION:-all}"
 RDI_EMBEDDING_SVD="${RDI_EMBEDDING_SVD:-false}"
 RDI_ENCODER_SINKHORN="${RDI_ENCODER_SINKHORN:-false}"
 RDI_ENCODER_BIAS="${RDI_ENCODER_BIAS:-false}"
 RDI_SINKHORN_ITERS=10
 RDI_SVD_RANK=10
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    -h|--help|help)
+      print_server2_rdi_usage
+      exit 0
+      ;;
+    init|ppo|offline|all|--detach|--foreground|--no-detach|--)
+      ;;
+    *)
+      GPU_LIST="$1"
+      GPU_LIST_DEFAULT="$1"
+      shift
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        RDI_OPTION="$1"
+        shift
+      else
+        RDI_OPTION="all"
+      fi
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        RDI_EMBEDDING_SVD="$1"
+        shift
+      fi
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        RDI_ENCODER_SINKHORN="$1"
+        shift
+      fi
+      if [[ $# -gt 0 && "$1" != --* ]]; then
+        RDI_ENCODER_BIAS="$1"
+        shift
+      fi
+      export GPU_LIST RDI_OPTION RDI_EMBEDDING_SVD RDI_ENCODER_SINKHORN RDI_ENCODER_BIAS
+      set -- ppo "$@"
+      ;;
+  esac
+fi
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common_ablation.sh"
 
