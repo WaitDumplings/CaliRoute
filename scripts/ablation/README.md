@@ -29,6 +29,11 @@ results/checkpoints/Cus_100_CS_20/CALIROUTE_EVRPTW_CUS100_CS20_PPO_INIT_SEED3009
 If that checkpoint is missing, the new SL-PPO/server7 scripts exit with an error
 and tell you to run `init_ppo100_1gpu.sh` first.
 
+On 2080Ti, PPO init is memory-bound. The init shell uses
+`PPO_STEP_CHUNK_SIZE=16` by default even when the ablation default is larger.
+If it is still too close to the limit, run with `INIT_PPO_STEP_CHUNK_SIZE=8` or
+lower `NUM_ENVS` for the init run.
+
 ## Server Assignment
 
 | Server | Script | Main input | Jobs to run |

@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_TAG="init_ppo100"
 GPU_LIST_DEFAULT="${GPU_LIST_DEFAULT:-0}"
+# The ablation default chunk can be too large for PPO init on 2080Ti.
+# Keep init memory-bounded unless explicitly overridden.
+PPO_STEP_CHUNK_SIZE="${INIT_PPO_STEP_CHUNK_SIZE:-16}"
+export PPO_STEP_CHUNK_SIZE
 
 print_usage() {
   cat <<EOF
@@ -14,7 +18,8 @@ Examples:
   bash scripts/ablation/init_ppo100_1gpu.sh 0 --foreground
 
 Trains or verifies the seed-matched PPO epoch-100 initial checkpoint used by
-SL-PPO and init-checkpoint PPO ablations.
+SL-PPO and init-checkpoint PPO ablations. Init defaults to
+PPO_STEP_CHUNK_SIZE=16 on 2080Ti; override with INIT_PPO_STEP_CHUNK_SIZE.
 EOF
 }
 
