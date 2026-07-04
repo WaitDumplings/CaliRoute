@@ -73,7 +73,12 @@ def main() -> None:
     parser.add_argument("--customers", type=int, required=True)
     parser.add_argument("--charging-stations", type=int, default=20)
     parser.add_argument("--problem", default="evrptw")
-    parser.add_argument("--representation", choices=["none", "euclidean", "svd", "road"], required=True)
+    parser.add_argument("--label", type=str, default=None)
+    parser.add_argument("--distance-option", choices=["base", "euclidean", "graph"], default=None)
+    parser.add_argument("--embedding-svd", choices=["true", "false"], default=None)
+    parser.add_argument("--encoder-sinkhorn", choices=["true", "false"], default=None)
+    parser.add_argument("--encoder-bias", choices=["true", "false"], default=None)
+    parser.add_argument("--representation", choices=["none", "base", "euclidean", "svd", "road", "graph"], required=True)
     parser.add_argument("--svd-rank", type=int, default=10)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--output", type=str, default=None)
@@ -105,6 +110,11 @@ def main() -> None:
 
     ratio = float(matched / total) if total else float("nan")
     row = {
+        "label": args.label or "",
+        "distance_option": args.distance_option or "",
+        "embedding_svd": args.embedding_svd or "",
+        "encoder_sinkhorn": args.encoder_sinkhorn or "",
+        "encoder_bias": args.encoder_bias or "",
         "dataset": str(Path(args.dataset)),
         "problem": args.problem,
         "customers": args.customers,

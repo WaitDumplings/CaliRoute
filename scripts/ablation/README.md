@@ -78,7 +78,7 @@ Stage split:
 | Server | `ppo` stage | `offline` stage |
 | --- | --- | --- |
 | Server1 | shared PPO init only | 10 expert-budget x incumbent SL-PPO jobs |
-| Server2 | 8 RDI PPO jobs | no non-PPO jobs |
+| Server2 | 8 RDI PPO jobs from scratch | no non-PPO jobs |
 | Server3 | 4 AGDA/progressive PPO jobs | 5 progressive/advantage SL-PPO jobs |
 | Server4 | 3 AGDA feature-group PPO jobs | 3 n_traj SL-PPO jobs |
 
@@ -123,31 +123,54 @@ BUDGETS="60 300 900" bash scripts/ablation/server1_expert_budget_incumbent_4gpu.
 
 ### Server2: RDI
 
-Server2 is PPO-only, so `offline` is intentionally a no-op.
+Server2 is PPO-only, so `offline` is intentionally a no-op. By default it
+launches the full Section 5.3 RDI table: 8 EVRPTW Cus100, single-seed, plain PPO
+runs with AGDA disabled. These RDI rows train from scratch and do not use the
+shared PPO init checkpoint.
 
 ```bash
 cd /data/Maojie/CaliRoute
 bash scripts/ablation/server2_rdi_4gpu.sh ppo
 ```
 
-Jobs:
+The shell is driven by one distance option and, for graph distance, three
+true/false injection switches:
 
-| Tag | Method | RDI setting |
-| --- | --- | --- |
-| `s2_base` | PPO | no distance, no SVD, no encoder bias, softmax |
-| `s2_euclidean` | PPO | Euclidean distance bias |
-| `s2_embedding_svd_only` | PPO | road-distance SVD embedding only |
-| `s2_encoder_sinkhorn_only` | PPO | Sinkhorn encoder normalization only |
-| `s2_encoder_bias_only` | PPO | road-distance encoder bias only |
-| `s2_embedding_svd_encoder_sinkhorn` | PPO | SVD embedding + Sinkhorn |
-| `s2_embedding_svd_encoder_bias` | PPO | SVD embedding + road-distance bias |
-| `s2_embedding_svd_sinkhorn_bias` | PPO | SVD embedding + Sinkhorn + road-distance bias |
+```bash
+RDI_OPTION=base|euclidean|graph
+RDI_EMBEDDING_SVD=true|false
+RDI_ENCODER_SINKHORN=true|false
+RDI_ENCODER_BIAS=true|false
+```
 
-This script also writes the nearest-neighbor diagnostic CSV:
+The default `RDI_OPTION=all` expands to these rows:
+
+| Tag | Distance option | Embedding SVD | Encoder Sinkhorn | Encoder bias | Method |
+| --- | --- | --- | --- | --- | --- |
+| `s2_base` | base | false | false | false | PPO |
+| `s2_euclidean` | euclidean | false | false | true | PPO |
+| `s2_embedding_svd_only` | graph | true | false | false | PPO |
+| `s2_encoder_sinkhorn_only` | graph | false | true | false | PPO |
+| `s2_encoder_bias_only` | graph | false | false | true | PPO |
+| `s2_embedding_svd_encoder_sinkhorn` | graph | true | true | false | PPO |
+| `s2_embedding_svd_encoder_bias` | graph | true | false | true | PPO |
+| `s2_embedding_svd_encoder_sinkhorn_encoder_bias` | graph | true | true | true | PPO |
+
+To run a single graph row for debugging:
+
+```bash
+RDI_OPTION=graph RDI_EMBEDDING_SVD=true RDI_ENCODER_SINKHORN=false RDI_ENCODER_BIAS=true \
+  bash scripts/ablation/server2_rdi_4gpu.sh ppo
+```
+
+This script also writes one nearest-neighbor diagnostic row per training run:
 
 ```bash
 results/launch_logs/ablation/<server2_run>/rdi_nn_match.csv
 ```
+
+The CSV includes the row label, option switches, effective NN representation,
+and `nn_match_percent`.
 
 ### Server3: AGDA + Progressive + SL-PPO Advantage
 
