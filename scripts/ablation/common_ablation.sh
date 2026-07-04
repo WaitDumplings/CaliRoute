@@ -145,7 +145,8 @@ COMMON_ARGS=(
   --mixed-precision
 )
 
-IFS=',' read -r -a GPU_LIST <<<"${GPU_LIST:-$GPU_LIST_DEFAULT}"
+GPU_LIST_SPEC="${GPU_LIST:-$GPU_LIST_DEFAULT}"
+IFS=',' read -r -a GPU_LIST <<<"$GPU_LIST_SPEC"
 RUN_DIR="${RUN_DIR:-$LOG_ROOT/${SCRIPT_TAG:-ablation}_seed${SEED}_${STAMP}}"
 mkdir -p "$RUN_DIR"
 
@@ -154,13 +155,14 @@ if [[ "$DETACH" != "0" && "${CALIROUTE_ABLATION_NOHUP_CHILD:-0}" != "1" ]]; then
   {
     echo "[Start] $(date '+%F %T') launching ${SCRIPT_TAG:-ablation} stage=${AB_STAGE} under nohup"
     echo "[Command] ${CALLER_SCRIPT} ${AB_STAGE} ${AB_EXTRA_ARGS[*]}"
+    echo "[GPU list] ${GPU_LIST_SPEC}"
     echo "[Run dir] ${RUN_DIR}"
   } >"$LAUNCH_LOG"
   if command -v setsid >/dev/null 2>&1; then
-    nohup setsid env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+    nohup setsid env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" GPU_LIST="$GPU_LIST_SPEC" \
       bash "$CALLER_SCRIPT" "$AB_STAGE" "${AB_EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
   else
-    nohup env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" \
+    nohup env CALIROUTE_ABLATION_NOHUP_CHILD=1 DETACH=0 STAMP="$STAMP" RUN_DIR="$RUN_DIR" GPU_LIST="$GPU_LIST_SPEC" \
       bash "$CALLER_SCRIPT" "$AB_STAGE" "${AB_EXTRA_ARGS[@]}" >>"$LAUNCH_LOG" 2>&1 &
   fi
   launcher_pid="$!"
@@ -228,10 +230,11 @@ start_job() {
   shift 2
   local baseline
   baseline="$(gpu_mem_used "$physical_gpu")"
-  echo "[Launch] ${tag} on GPU${physical_gpu}; baseline=${baseline}MiB"
+  echo "[Launch] ${tag} on physical GPU${physical_gpu}; baseline=${baseline}MiB; CUDA_VISIBLE_DEVICES=${physical_gpu}; train_device=cuda:0"
   (
     export CUDA_VISIBLE_DEVICES="$physical_gpu"
     export PYTHONUNBUFFERED=1
+    echo "[JobEnv] physical_gpu=${physical_gpu} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES} train_device=cuda:0"
     "$PYTHON_BIN" train.py "$@" --device cuda:0
   ) >"$RUN_DIR/${tag}.log" 2>&1 &
   local pid="$!"
