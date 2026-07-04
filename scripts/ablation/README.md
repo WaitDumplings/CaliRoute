@@ -180,7 +180,25 @@ and `nn_match_percent`.
 
 ### Server3: AGDA + Progressive + SL-PPO Advantage
 
-Phase 1 launches PPO architecture/progressive jobs:
+For AGDA rows, the preferred single-run interface is positional:
+
+```bash
+cd /data/Maojie/CaliRoute
+bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh GPU_ID DYNAMIC_KV DYNAMIC_ACTION_LOGITS
+```
+
+All AGDA single-run rows use road graph distance with encoder bias only. DDE/query
+is on by default; `DYNAMIC_KV=true` maps to `--qkv-delta kv`, and
+`DYNAMIC_ACTION_LOGITS=true` maps to `--action-key on --action-bias on`.
+
+| Command suffix | Row |
+| --- | --- |
+| `0 true true` | both: dynamic KV + dynamic action logits |
+| `1 true false` | dynamic KV only |
+| `2 false true` | dynamic action logits only |
+| `3 false false` | reuse Server2 `encoder_bias_only`; no AGDA job launched |
+
+The old `ppo` stage still launches the bundled PPO architecture/progressive jobs:
 
 ```bash
 cd /data/Maojie/CaliRoute
