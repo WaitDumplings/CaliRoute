@@ -119,6 +119,12 @@ if [[ -z "${INIT_CKPT:-}" ]]; then
   fi
 fi
 
+if [[ "${AB_REQUIRE_INIT_CKPT:-0}" == "1" && ! -s "$INIT_CKPT" ]]; then
+  echo "[Error] missing PPO epoch-${INIT_EPOCH} initial checkpoint for seed ${SEED}: ${INIT_CKPT}" >&2
+  echo "Run: bash scripts/ablation/init_ppo100_1gpu.sh GPU_ID" >&2
+  exit 1
+fi
+
 COMMON_ARGS=(
   --problem "$PROBLEM"
   --customers "$CUSTOMERS"

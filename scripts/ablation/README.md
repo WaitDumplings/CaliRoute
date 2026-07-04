@@ -1,23 +1,6 @@
 # EVRPTW Cus100 Ablation Launch Scripts
 
-These scripts launch the EVRPTW Cus100 ablation batch from
-`/data/Maojie/experiment_spec.md`. They are designed for multi-server runs where
-each physical server executes one script and distributes jobs across its local
-GPUs in waves.
-
-The scripts run on the `ablation` branch of CaliRoute. The expected default data
-layout is:
-
-```bash
-/data/Maojie/CaliRoute
-/data/Maojie/Routing-D
-```
-
-If the dataset is elsewhere, set `DATA_ROOT=/path/to/Routing-D`.
-
-## Quick Start
-
-Run from the repository root:
+Run these from the CaliRoute repository root on branch `ablation`:
 
 ```bash
 cd /data/Maojie/CaliRoute
@@ -25,140 +8,48 @@ git checkout ablation
 git pull
 ```
 
-Check the script interface:
+The scripts detach under `nohup` by default. Add `--foreground` or `--no-detach`
+for a local sanity check.
+
+## Initial PPO Checkpoint
+
+SL-PPO ablations and init-checkpoint PPO ablations require the seed-matched PPO
+100-epoch initial weight. They do not silently train it. Create or verify it with:
 
 ```bash
-bash scripts/ablation/server2_rdi_4gpu.sh help
+bash scripts/ablation/init_ppo100_1gpu.sh 0
 ```
 
-Each script accepts one stage argument and detaches under `nohup` by default:
+Default checkpoint path:
 
 ```bash
-bash scripts/ablation/serverX_*.sh init
-bash scripts/ablation/serverX_*.sh ppo
-bash scripts/ablation/serverX_*.sh offline
-bash scripts/ablation/serverX_*.sh all
+results/checkpoints/Cus_100_CS_20/CALIROUTE_EVRPTW_CUS100_CS20_PPO_INIT_SEED3009_E100_N24_R160_2080TI/seed_3009/checkpoint_epoch_0100.pt
 ```
 
-Use `--foreground` or `--no-detach` when you want to debug in the current terminal:
-
-```bash
-bash scripts/ablation/serverX_*.sh ppo --foreground
-```
-
-- `init`: train the shared PPO epoch-100 initial checkpoint only.
-- `ppo`: ensure the shared PPO initial checkpoint, then run this server's PPO
-  ablation jobs.
-- `offline`: wait for the shared PPO initial checkpoint, then run non-PPO jobs
-  such as SL-PPO, DAPG, or AWBC.
-- `all`: run init if needed, then run both PPO and offline jobs for that server.
-
-Use the two-stage flow for any server whose ablation group contains offline
-methods:
-
-```bash
-bash scripts/ablation/serverX_*.sh ppo
-bash scripts/ablation/serverX_*.sh offline
-```
-
-The offline stage uses `--init-checkpoint` from the PPO epoch-100 checkpoint.
-It does not retrain PPO.
+If that checkpoint is missing, the new SL-PPO/server7 scripts exit with an error
+and tell you to run `init_ppo100_1gpu.sh` first.
 
 ## Server Assignment
 
-| Physical server | Script | GPUs | New jobs | Spec group |
-| --- | --- | --- | ---: | --- |
-| Server1 | `server1_expert_budget_incumbent_4gpu.sh` | `0,1,2,3` | 10 | expert budget x incumbent robustness |
-| Server2 | `server2_rdi_4gpu.sh` | `0,1,2,3` | 8 | RDI ablation |
-| Server3 | `server3_agda_progressive_slppo_4gpu.sh` | `0,1,2,3` | 9 | AGDA + progressive + SL-PPO advantage |
-| Server4 | `server4_ntraj_feature_groups_3gpu.sh` | `0,1,2` | 6 | n_traj + AGDA feature groups |
+| Server | Script | Main input | Jobs to run |
+| --- | --- | --- | ---: |
+| Init | `init_ppo100_1gpu.sh` | `GPU_ID` | 1 |
+| Server2 | `server2_rdi_4gpu.sh` | `GPU_ID RDI_OPTION RDI_EMBEDDING RDI_ENCODER_SINKHORN RDI_ENCODER_BIAS` | 8 RDI rows |
+| Server3 | `server3_agda_progressive_slppo_4gpu.sh` | `GPU_ID DYNAMIC_KV DYNAMIC_ACTION_LOGITS` | 3 AGDA rows; neither reused |
+| Server4 | `server4_expert_budget_incumbent_4gpu.sh` | `GPU_ID EXPERT_BUDGET_S INCUMBENT` | 10 budget x incumbent rows |
+| Server5 | `server5_advantage_terms_slppo.sh` | `GPU_ID GROUP_USE REFERENCE_USE` | 2 advantage rows; both reused |
+| Server6 | `server6_ntraj_slppo.sh` | `[GPU_ID] N_TRAJ` | 3 K rows; main K reused |
+| Server7 | `server7_agda_feature_groups_ppo.sh` | `GPU_ID DISTANCE_FEATURE CAPACITY_FEATURE BATTERY_FEATURE` | 3 feature rows; all-on reused |
 
-Stage split:
+## Server2: RDI
 
-| Server | `ppo` stage | `offline` stage |
-| --- | --- | --- |
-| Server1 | shared PPO init only | 10 expert-budget x incumbent SL-PPO jobs |
-| Server2 | 8 RDI PPO jobs from scratch | no non-PPO jobs |
-| Server3 | 4 AGDA/progressive PPO jobs | 5 progressive/advantage SL-PPO jobs |
-| Server4 | 3 AGDA feature-group PPO jobs | 3 n_traj SL-PPO jobs |
-
-## Run Templates
-
-### Server1: Expert Budget x Incumbent
-
-Phase 1 creates or verifies the shared PPO initial checkpoint:
+Full RDI table:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server1_expert_budget_incumbent_4gpu.sh ppo
-```
-
-Phase 2 launches the 10 SL-PPO offline jobs:
-
-```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server1_expert_budget_incumbent_4gpu.sh offline
-```
-
-Jobs:
-
-| Tag template | Method | Main knobs |
-| --- | --- | --- |
-| `s1_budget60_incon` | SL-PPO | `checkpoint_s=60`, incumbent on |
-| `s1_budget60_incoff` | SL-PPO | `checkpoint_s=60`, incumbent off |
-| `s1_budget300_incon` | SL-PPO | `checkpoint_s=300`, incumbent on |
-| `s1_budget300_incoff` | SL-PPO | `checkpoint_s=300`, incumbent off |
-| `s1_budget900_incon` | SL-PPO | `checkpoint_s=900`, incumbent on |
-| `s1_budget900_incoff` | SL-PPO | `checkpoint_s=900`, incumbent off |
-| `s1_budget3600_incon` | SL-PPO | `checkpoint_s=3600`, incumbent on |
-| `s1_budget3600_incoff` | SL-PPO | `checkpoint_s=3600`, incumbent off |
-| `s1_budget7200_incon` | SL-PPO | `checkpoint_s=7200`, incumbent on |
-| `s1_budget7200_incoff` | SL-PPO | `checkpoint_s=7200`, incumbent off |
-
-To change the budgets:
-
-```bash
-BUDGETS="60 300 900" bash scripts/ablation/server1_expert_budget_incumbent_4gpu.sh offline
-```
-
-### Server2: RDI
-
-Server2 is PPO-only, so `offline` is intentionally a no-op. By default it
-launches the full Section 5.3 RDI table: 8 EVRPTW Cus100, single-seed, plain PPO
-runs with AGDA disabled. These RDI rows train from scratch and do not use the
-shared PPO init checkpoint.
-
-```bash
-cd /data/Maojie/CaliRoute
 bash scripts/ablation/server2_rdi_4gpu.sh 0,1,2,3 all
 ```
 
-The preferred interface is positional:
-
-```bash
-bash scripts/ablation/server2_rdi_4gpu.sh GPU_ID RDI_OPTION RDI_EMBEDDING RDI_ENCODER_SINKHORN RDI_ENCODER_BIAS
-```
-
-- `GPU_ID`: one GPU id such as `2`, or a comma list such as `0,1,2,3`.
-- `RDI_OPTION`: `all`, `base`, `euclidean`, or `graph`.
-- `RDI_EMBEDDING`: `true` enables SVD embedding; `false` disables it.
-- For `graph`, the three switches are `true|false`; at least one must be `true`.
-- For `base` and `euclidean`, the switch arguments can be omitted or left `false`.
-
-`RDI_OPTION=all` expands to these rows:
-
-| Tag | Distance option | Embedding SVD | Encoder Sinkhorn | Encoder bias | Method |
-| --- | --- | --- | --- | --- | --- |
-| `s2_base` | base | false | false | false | PPO |
-| `s2_euclidean` | euclidean | false | false | true | PPO |
-| `s2_embedding_svd_only` | graph | true | false | false | PPO |
-| `s2_encoder_sinkhorn_only` | graph | false | true | false | PPO |
-| `s2_encoder_bias_only` | graph | false | false | true | PPO |
-| `s2_embedding_svd_encoder_sinkhorn` | graph | true | true | false | PPO |
-| `s2_embedding_svd_encoder_bias` | graph | true | false | true | PPO |
-| `s2_embedding_svd_encoder_sinkhorn_encoder_bias` | graph | true | true | true | PPO |
-
-To run one row:
+Single rows:
 
 ```bash
 bash scripts/ablation/server2_rdi_4gpu.sh 0 base false false false
@@ -166,301 +57,130 @@ bash scripts/ablation/server2_rdi_4gpu.sh 1 euclidean false false false
 bash scripts/ablation/server2_rdi_4gpu.sh 2 graph true false true
 ```
 
-The old stage/env interface still works for compatibility, for example
-`RDI_OPTION=graph RDI_EMBEDDING_SVD=true RDI_ENCODER_BIAS=true bash scripts/ablation/server2_rdi_4gpu.sh ppo`.
+`RDI_OPTION=all` expands to base, euclidean, SVD-only, Sinkhorn-only,
+encoder-bias-only, and the three combinations. RDI rows are plain PPO from
+scratch with AGDA disabled. The script writes NN-match diagnostics to
+`rdi_nn_match.csv` in the launch directory.
 
-This script also writes one nearest-neighbor diagnostic row per training run:
+## Server3: AGDA
+
+Fixed: road graph distance, RDI encoder bias only, DDE/query on. Inputs control
+`dynamic_kv` and `dynamic_action_logits`:
 
 ```bash
-results/launch_logs/ablation/<server2_run>/rdi_nn_match.csv
+bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh 0 true true    # both
+bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh 1 true false   # dynamic KV only
+bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh 2 false true   # dynamic action logits only
+bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh 3 false false  # reuse Server2 encoder_bias_only
 ```
 
-The CSV includes the row label, option switches, effective NN representation,
-and `nn_match_percent`.
+`dynamic_kv=true` maps to `--qkv-delta kv`. `dynamic_action_logits=true` maps to
+`--action-key on --action-bias on`.
 
-### Server3: AGDA + Progressive + SL-PPO Advantage
+## Server4: Expert Budget x Incumbent
 
-For AGDA rows, the preferred single-run interface is positional:
+Fixed: full architecture, SL-PPO, EVRPTW Cus100, single seed, RDI encoder bias,
+AGDA action-key logits. Variables are expert budget and incumbent:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh GPU_ID DYNAMIC_KV DYNAMIC_ACTION_LOGITS
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 60 true
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 1 60 false
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 300 true
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 1 300 false
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 900 true
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 1 900 false
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 3600 true
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 1 3600 false
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 7200 true
+bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 1 7200 false
 ```
 
-All AGDA single-run rows use road graph distance with encoder bias only. DDE/query
-is on by default; `DYNAMIC_KV=true` maps to `--qkv-delta kv`, and
-`DYNAMIC_ACTION_LOGITS=true` maps to `--action-key on --action-bias on`.
+`incumbent=true` uses `C_ref = min(C_expert@budget, C_incumbent)` when memory is
+available. `incumbent=false` uses only `C_expert@budget` and drops the reference
+term for instances without an expert at that budget.
 
-| Command suffix | Row |
-| --- | --- |
-| `0 true true` | both: dynamic KV + dynamic action logits |
-| `1 true false` | dynamic KV only |
-| `2 false true` | dynamic action logits only |
-| `3 false false` | reuse Server2 `encoder_bias_only`; no AGDA job launched |
+Training logs include both static expert coverage and dynamic SL-PPO reference
+coverage:
 
-The old `ppo` stage still launches the bundled PPO architecture/progressive jobs:
-
-```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh ppo
+```text
+expert_reference_coverage      # expert trace coverage at the selected budget
+sl_reference_coverage          # expert or memory incumbent available in that batch
+sl_expert_reference_coverage
+sl_memory_reference_coverage
 ```
 
-Phase 2 launches SL-PPO progressive and advantage-component jobs:
+Final validation cost is in `eval_log.csv` and the matching final-epoch row of
+`train_log.csv`.
+
+## Server5: Advantage Terms
+
+Fixed: full architecture, SL-PPO, expert budget 7200s, incumbent on. Only the two
+advantage switches vary:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh offline
+bash scripts/ablation/server5_advantage_terms_slppo.sh 0 true false   # group_only
+bash scripts/ablation/server5_advantage_terms_slppo.sh 1 false true   # reference_only
+bash scripts/ablation/server5_advantage_terms_slppo.sh 2 true true    # reuse Main Results SL-PPO
 ```
 
-PPO jobs:
+`false false` is outside this ablation and is rejected.
 
-| Tag | Method | Main knobs |
-| --- | --- | --- |
-| `s3_agda_kv_only` | PPO | DDE on, QKV delta on KV only |
-| `s3_agda_action_key_only` | PPO | DDE on, action key + action bias |
-| `s3_agda_both` | PPO | DDE on, KV delta + action key/bias |
-| `s3_progressive_rdi_off_agda_on_ppo` | PPO | RDI off, AGDA on |
+## Server6: Training K / N_TRAJ
 
-Offline jobs:
+Fixed: full architecture, SL-PPO, expert budget 7200s, incumbent on. Eval width is
+always forced to `eval_n_traj=50`; only training `n_traj` changes.
 
-| Tag | Method | Main knobs |
-| --- | --- | --- |
-| `s3_progressive_rdi_off_agda_off_slppo` | SL-PPO | RDI off, AGDA off |
-| `s3_progressive_rdi_on_agda_off_slppo` | SL-PPO | RDI on, AGDA off |
-| `s3_progressive_rdi_off_agda_on_slppo` | SL-PPO | RDI off, AGDA on |
-| `s3_slppo_group_only` | SL-PPO | group advantage only |
-| `s3_slppo_reference_only` | SL-PPO | reference advantage only |
-
-### Server4: n_traj + AGDA Feature Groups
-
-Phase 1 launches PPO feature-group ablations:
+Run K=100 first on 2080Ti because it is the OOM-risk cell:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server4_ntraj_feature_groups_3gpu.sh ppo
+bash scripts/ablation/server6_ntraj_slppo.sh 0 100
+bash scripts/ablation/server6_ntraj_slppo.sh 1 5
+bash scripts/ablation/server6_ntraj_slppo.sh 2 15
 ```
 
-Phase 2 launches SL-PPO `n_traj` ablations:
+You can also omit GPU and use GPU 0 by default:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server4_ntraj_feature_groups_3gpu.sh offline
+bash scripts/ablation/server6_ntraj_slppo.sh 60
 ```
 
-PPO jobs:
+## Server7: AGDA Feature Groups
 
-| Tag | Method | Main knobs |
-| --- | --- | --- |
-| `s4_without_distance_features` | PPO | drop AGDA distance feature group |
-| `s4_without_capacity_features` | PPO | drop AGDA capacity feature group |
-| `s4_without_battery_features` | PPO | drop AGDA battery feature group |
-
-Offline jobs:
-
-| Tag | Method | Main knobs |
-| --- | --- | --- |
-| `s4_ntraj100` | SL-PPO | `n_traj=100`, launched first because it is the OOM-risk cell |
-| `s4_ntraj5` | SL-PPO | `n_traj=5` |
-| `s4_ntraj15` | SL-PPO | `n_traj=15` |
-
-## Nohup Templates
-
-The server scripts detach the whole stage with `nohup` by default. The command
-returns after writing the detached launcher pid and log path.
+Fixed: full architecture, plain PPO, EVRPTW Cus100, single seed, RDI encoder
+bias, AGDA action-key logits. Set exactly one feature group to `false`:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server2_rdi_4gpu.sh ppo
+bash scripts/ablation/server7_agda_feature_groups_ppo.sh 0 false true true  # without_distance
+bash scripts/ablation/server7_agda_feature_groups_ppo.sh 1 true false true  # without_capacity
+bash scripts/ablation/server7_agda_feature_groups_ppo.sh 2 true true false  # without_battery
+bash scripts/ablation/server7_agda_feature_groups_ppo.sh 3 true true true   # reuse Server3 action_key_only
 ```
 
-For a two-stage server, launch PPO first and launch offline after the PPO stage
-has finished:
+Multiple `false` values are outside this ablation and are rejected.
+
+## Common Overrides
+
+Defaults are EVRPTW Cus100, CS20, seed 3009, 1500 epochs, eval every 20 epochs,
+`num_envs=24`, `n_traj=50`, `eval_n_traj=50`, rollout steps 160, and mixed
+precision.
+
+Useful overrides:
 
 ```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh ppo
+SEED=1234 bash scripts/ablation/init_ppo100_1gpu.sh 0
+DATA_ROOT=/data/Maojie/Routing-D bash scripts/ablation/server4_expert_budget_incumbent_4gpu.sh 0 7200 true
+EPOCHS=1 EVAL_INTERVAL=0 bash scripts/ablation/server7_agda_feature_groups_ppo.sh 0 false true true --foreground
+LOG_ROOT=/data/Maojie/ablation_logs bash scripts/ablation/server6_ntraj_slppo.sh 0 100
+MAX_GPU_MEM_MIB=10500 bash scripts/ablation/server6_ntraj_slppo.sh 0 100
+INIT_CKPT=/path/to/checkpoint_epoch_0100.pt bash scripts/ablation/server5_advantage_terms_slppo.sh 0 true false
 ```
 
-```bash
-cd /data/Maojie/CaliRoute
-bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh offline
-```
+Each detached launcher writes:
 
-Each detached stage writes:
-
-```bash
+```text
 results/launch_logs/ablation/<script_tag>_seed<seed>_<timestamp>/launcher.log
 results/launch_logs/ablation/<script_tag>_seed<seed>_<timestamp>/launcher.pid
 ```
 
-Use `--foreground` for short sanity checks or debugging:
-
-```bash
-EPOCHS=1 EVAL_INTERVAL=0 GPU_LIST=0 bash scripts/ablation/server2_rdi_4gpu.sh ppo --foreground
-```
-
-## Common Overrides
-
-All server scripts source `common_ablation.sh`, so these overrides work for
-every server.
-
-Use a non-default data path:
-
-```bash
-DATA_ROOT=/data/Maojie/Routing-D bash scripts/ablation/server2_rdi_4gpu.sh ppo
-```
-
-Use specific GPUs:
-
-```bash
-GPU_LIST=0,1,2 bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh ppo
-```
-
-Use an explicit PPO initial checkpoint:
-
-```bash
-INIT_CKPT=/path/to/checkpoint_epoch_0100.pt bash scripts/ablation/server3_agda_progressive_slppo_4gpu.sh offline
-```
-
-Run fewer epochs for debugging:
-
-```bash
-EPOCHS=20 EVAL_INTERVAL=5 bash scripts/ablation/server2_rdi_4gpu.sh ppo
-```
-
-Change the seed:
-
-```bash
-SEED=1234 bash scripts/ablation/server2_rdi_4gpu.sh ppo
-```
-
-Write launch logs to a custom directory:
-
-```bash
-LOG_ROOT=/data/Maojie/ablation_logs bash scripts/ablation/server4_ntraj_feature_groups_3gpu.sh offline
-```
-
-Use a fixed run directory:
-
-```bash
-RUN_DIR=/data/Maojie/ablation_logs/server2_test bash scripts/ablation/server2_rdi_4gpu.sh ppo
-```
-
-Tighten or relax the GPU-memory kill threshold:
-
-```bash
-MAX_GPU_MEM_MIB=10500 bash scripts/ablation/server4_ntraj_feature_groups_3gpu.sh offline
-```
-
-## Default Experiment Geometry
-
-The default EVRPTW Cus100 settings are:
-
-```bash
-PROBLEM=evrptw
-CUSTOMERS=100
-CS=20
-SEED=3009
-EPOCHS=1500
-INIT_EPOCH=100
-INIT_EVAL_INTERVAL=20
-NUM_ENVS=24
-N_TRAJ=50
-EVAL_N_TRAJ=50
-ROLLOUT_STEPS=160
-EVAL_MAX_STEPS=160
-PPO_STEP_CHUNK_SIZE=16
-NUM_MINIBATCHES=4
-EVAL_INTERVAL=20
-EVAL_BATCH_SIZE=128
-CHECKPOINT_INTERVAL=50
-MAX_GPU_MEM_MIB=11000
-```
-
-This geometry is intended to fit a 2080Ti. In one-epoch sanity checks, the
-largest cell, Server4 `n_traj=100`, exceeded the 11GB budget at
-`NUM_ENVS=64` and `NUM_ENVS=32`, but completed at `NUM_ENVS=24` with about
-9.1GB peak delta above baseline.
-
-## Initial Checkpoint Logic
-
-The scripts use this priority order for the PPO epoch-100 initial checkpoint:
-
-1. Explicit `INIT_CKPT=/path/to/checkpoint_epoch_0100.pt`.
-2. Local CaliRoute checkpoint from the `init` stage:
-
-```bash
-results/checkpoints/Cus_100_CS_20/CALIROUTE_EVRPTW_CUS100_CS20_PPO_INIT_SEED3009_E100_N24_R160_2080TI/seed_3009/checkpoint_epoch_0100.pt
-```
-
-3. Legacy sibling-repo checkpoint when it exists:
-
-```bash
-../EVRPTW-OFFLINE2ONLINE/results/checkpoints/Cus_100_CS_20/O2O_CUS100_PPO_ROUTE_POS_SEED3009_E1500_N128_CHUNK32_EVAL20/seed_3009/checkpoint_epoch_0100.pt
-```
-
-If no checkpoint exists and the stage is `init`, `ppo`, or `all`, the script
-trains the local initial checkpoint first. Initial PPO training always evaluates
-every 20 epochs. If the stage is `offline`, the script waits until the
-checkpoint file appears.
-
-## Logs and Monitoring
-
-Launch logs are written under:
-
-```bash
-results/launch_logs/ablation/<script_tag>_seed<seed>_<timestamp>/
-```
-
-Each job writes:
-
-```bash
-<tag>.log
-<tag>.gpu_mem.log
-<tag>.pid
-```
-
-Useful monitoring commands:
-
-```bash
-nvidia-smi
-tail -f results/launch_logs/ablation/<run_dir>/<tag>.log
-tail -f results/launch_logs/ablation/<run_dir>/<tag>.gpu_mem.log
-```
-
-The GPU-memory monitor kills a job if memory delta exceeds
-`MAX_GPU_MEM_MIB`.
-
-## Values Reused Rather Than Re-run
-
-The scripts only launch the 33 new ablation jobs from the specification. These
-table cells should be filled from existing rows:
-
-- AGDA `neither`: reuse Server2 `encoder_bias_only`.
-- Progressive `RDI off, AGDA off, PPO`: reuse Server2 `base`.
-- Progressive `RDI on, AGDA off, PPO`: reuse Server2 `encoder_bias_only`.
-- Progressive `RDI on, AGDA on, PPO`: reuse Server3 `agda_action_key_only`
-  or the main-result PPO row.
-- Progressive `RDI on, AGDA on, SL-PPO`: reuse the main-result SL-PPO row.
-- SL-PPO advantage `both`: reuse the main-result SL-PPO row.
-- AGDA feature-group full/no-removal: reuse Server3 `agda_action_key_only`.
-- `n_traj` main K value: reuse the main-result SL-PPO row.
-
-## Sanity-Check Templates
-
-Before launching a full server batch, run a short test on one server:
-
-```bash
-cd /data/Maojie/CaliRoute
-EPOCHS=1 EVAL_INTERVAL=0 GPU_LIST=0 bash scripts/ablation/server2_rdi_4gpu.sh ppo
-```
-
-For offline memory risk, test Server4 `n_traj=100` first:
-
-```bash
-cd /data/Maojie/CaliRoute
-EPOCHS=1 EVAL_INTERVAL=0 GPU_LIST=0 bash scripts/ablation/server4_ntraj_feature_groups_3gpu.sh offline
-```
-
-If this exceeds the memory budget, reduce `NUM_ENVS` before launching the full
-batch.
+Each job writes `<tag>.log`, `<tag>.gpu_mem.log`, and `<tag>.pid` in the same
+launch directory.

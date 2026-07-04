@@ -2567,7 +2567,41 @@ def _solution_level_advantage_tensors(
         "sl_obj_within_std_mean": 0.0,
         "sl_obj_valid_count_mean": 0.0,
         "sl_group_reference_count": 0.0,
+        "sl_reference_count": 0.0,
+        "sl_reference_coverage": 0.0,
+        "sl_expert_reference_count": 0.0,
+        "sl_expert_reference_coverage": 0.0,
+        "sl_memory_reference_count": 0.0,
+        "sl_memory_reference_coverage": 0.0,
     }
+
+    use_memory_reference = bool(adv_cfg.get("sl_use_memory_incumbent", True))
+    expert_reference_count = 0
+    memory_reference_count = 0
+    any_reference_count = 0
+    for env in envs[:num_envs]:
+        instance_id = _env_instance_id(env)
+        expert_available = False
+        if expert_buffer is not None:
+            ref_obj = expert_buffer.reference_objective(instance_id)
+            expert_available = ref_obj is not None and np.isfinite(ref_obj) and ref_obj > 0.0
+        memory_available = False
+        if use_memory_reference and policy_best_objectives is not None and instance_id is not None:
+            memory_obj = policy_best_objectives.get(instance_id)
+            memory_available = memory_obj is not None and np.isfinite(memory_obj) and memory_obj > 0.0
+        if expert_available:
+            expert_reference_count += 1
+        if memory_available:
+            memory_reference_count += 1
+        if expert_available or memory_available:
+            any_reference_count += 1
+    coverage_denom = max(num_envs, 1)
+    info["sl_reference_count"] = float(any_reference_count)
+    info["sl_reference_coverage"] = float(any_reference_count / coverage_denom)
+    info["sl_expert_reference_count"] = float(expert_reference_count)
+    info["sl_expert_reference_coverage"] = float(expert_reference_count / coverage_denom)
+    info["sl_memory_reference_count"] = float(memory_reference_count)
+    info["sl_memory_reference_coverage"] = float(memory_reference_count / coverage_denom)
 
     if use_group:
         num_customers = max(1, int(cfg.get("data", {}).get("num_customers", 1)))
@@ -4301,6 +4335,12 @@ def train_from_config(
         "sl_obj_within_std_mean",
         "sl_obj_valid_count_mean",
         "sl_group_reference_count",
+        "sl_reference_count",
+        "sl_reference_coverage",
+        "sl_expert_reference_count",
+        "sl_expert_reference_coverage",
+        "sl_memory_reference_count",
+        "sl_memory_reference_coverage",
         "sl_ref_gate_mean",
         "sl_ref_gate_std",
         "sl_ref_memory_gate_mean",
@@ -5423,6 +5463,12 @@ def train_from_config(
                         "sl_obj_within_std_mean": adv_info.get("sl_obj_within_std_mean", 0.0),
                         "sl_obj_valid_count_mean": adv_info.get("sl_obj_valid_count_mean", 0.0),
                         "sl_group_reference_count": adv_info.get("sl_group_reference_count", 0.0),
+                        "sl_reference_count": adv_info.get("sl_reference_count", 0.0),
+                        "sl_reference_coverage": adv_info.get("sl_reference_coverage", 0.0),
+                        "sl_expert_reference_count": adv_info.get("sl_expert_reference_count", 0.0),
+                        "sl_expert_reference_coverage": adv_info.get("sl_expert_reference_coverage", 0.0),
+                        "sl_memory_reference_count": adv_info.get("sl_memory_reference_count", 0.0),
+                        "sl_memory_reference_coverage": adv_info.get("sl_memory_reference_coverage", 0.0),
                         "sl_ref_gate_mean": adv_info.get("ref_gate_mean", 0.0),
                         "sl_ref_gate_std": adv_info.get("ref_gate_std", 0.0),
                         "sl_ref_memory_gate_mean": adv_info.get("ref_memory_gate_mean", 0.0),
