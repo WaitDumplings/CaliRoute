@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -45,6 +46,21 @@ class ExpertRecord:
 class ExpertTrajectory:
     instance_id: str
     observations: list[dict[str, np.ndarray]]
+    actions: list[int]
+    objective_distance_km: float
+    vehicle_count: int
+    same_route_matrix: np.ndarray | None = None
+
+    @property
+    def length(self) -> int:
+        return len(self.actions)
+
+
+@dataclass
+class ExpertReference:
+    instance_id: str
+    instance: Any
+    routes: list[list[int]]
     actions: list[int]
     objective_distance_km: float
     vehicle_count: int
@@ -209,6 +225,132 @@ def load_solver_expert_records(
 load_gurobi_expert_records = load_solver_expert_records
 
 
+def _expert_env_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    env_cfg = dict(cfg.get("env", {}) or {})
+    env_cfg["use_fast_env"] = True
+    env_cfg.setdefault("info_level", "light")
+    scale_mode = str(env_cfg.get("reward_distance_scale_mode", ""))
+    if scale_mode.startswith("dataset_"):
+        env_cfg["reward_distance_scale_mode"] = scale_mode[len("dataset_") :]
+    return env_cfg
+
+
+def _replay_expert_record(
+    record: ExpertRecord,
+    *,
+    env_cfg: dict[str, Any],
+    make_terran_env,
+    num_customers: int,
+    store_observations: bool,
+) -> tuple[ExpertTrajectory | ExpertReference | None, dict[str, Any] | None, float | None, int]:
+    clean_routes = _clean_routes(record.routes)
+    same_route_matrix = (
+        same_route_matrix_from_routes(clean_routes, num_customers)
+        if num_customers > 0
+        else None
+    )
+    route_count = len(clean_routes)
+    env = make_terran_env(instance=record.instance, n_traj=1, pbrs_config=None, **env_cfg)
+    obs, info = env.reset()
+    observations: list[dict[str, np.ndarray]] = []
+    actions: list[int] = []
+    invalid_step: dict[str, Any] | None = None
+    for step_idx, action in enumerate(route_actions(clean_routes)):
+        action_i = int(action)
+        mask = np.asarray(obs["action_mask"], dtype=bool)
+        if mask.shape[0] != 1 or action_i < 0 or action_i >= mask.shape[1] or not bool(mask[0, action_i]):
+            invalid_step = {
+                "instance_id": record.instance_id,
+                "step": step_idx,
+                "action": action_i,
+                "mask_shape": tuple(mask.shape),
+            }
+            break
+        if store_observations:
+            observations.append({key: np.asarray(value).copy() for key, value in obs.items()})
+        actions.append(action_i)
+        obs, reward, terminated, truncated, info = env.step(np.asarray([action_i], dtype=np.int64))
+        if bool(np.asarray(truncated, dtype=bool)[0]):
+            invalid_step = {
+                "instance_id": record.instance_id,
+                "step": step_idx,
+                "action": action_i,
+                "reason": "truncated_after_expert_action",
+            }
+            break
+    success = bool(np.asarray(info.get("success", [False]), dtype=bool)[0])
+    if invalid_step is not None or not success:
+        return (
+            None,
+            invalid_step
+            or {
+                "instance_id": record.instance_id,
+                "reason": "expert_route_replay_not_successful",
+                "served": int(np.asarray(info.get("served_customers", [0]))[0]),
+            },
+            None,
+            route_count,
+        )
+    if not actions:
+        return None, None, None, route_count
+
+    objective_error: float | None = None
+    objective = np.asarray(info.get("objective_distance_km", []), dtype=np.float64).reshape(-1)
+    if objective.size > 0 and np.isfinite(objective[0]):
+        objective_error = abs(float(objective[0]) - float(record.objective_distance_km))
+    if store_observations:
+        return (
+            ExpertTrajectory(
+                instance_id=record.instance_id,
+                observations=observations,
+                actions=actions,
+                objective_distance_km=record.objective_distance_km,
+                vehicle_count=record.vehicle_count,
+                same_route_matrix=same_route_matrix,
+            ),
+            None,
+            objective_error,
+            route_count,
+        )
+    return (
+        ExpertReference(
+            instance_id=record.instance_id,
+            instance=record.instance,
+            routes=clean_routes,
+            actions=actions,
+            objective_distance_km=record.objective_distance_km,
+            vehicle_count=record.vehicle_count,
+            same_route_matrix=same_route_matrix,
+        ),
+        None,
+        objective_error,
+        route_count,
+    )
+
+
+def _expert_replay_stats(
+    *,
+    selected_count: int,
+    item_count: int,
+    invalid_records: list[dict[str, Any]],
+    objective_errors: list[float],
+    route_counts: list[int],
+    steps: int,
+) -> dict[str, Any]:
+    return {
+        "records_seen": int(selected_count),
+        "trajectories": int(item_count),
+        "invalid_records": len(invalid_records),
+        "steps": int(steps),
+        "avg_steps_per_route": float(steps / max(item_count, 1)),
+        "expert_replay_success_rate": float(item_count / max(selected_count, 1)),
+        "expert_action_valid_ratio": float(1.0 - len(invalid_records) / max(selected_count, 1)),
+        "expert_env_replay_obj_error_mean": float(np.mean(objective_errors)) if objective_errors else float("nan"),
+        "expert_env_replay_obj_error_max": float(np.max(objective_errors)) if objective_errors else float("nan"),
+        "expert_route_count_mean": float(np.mean(route_counts)) if route_counts else 0.0,
+    }
+
+
 def build_expert_trajectories(
     records: Sequence[ExpertRecord],
     cfg: dict[str, Any],
@@ -218,13 +360,7 @@ def build_expert_trajectories(
     seed: int = 0,
 ) -> tuple[list[ExpertTrajectory], dict[str, Any]]:
     del seed
-    env_cfg = dict(cfg.get("env", {}) or {})
-    env_cfg["use_fast_env"] = True
-    env_cfg.setdefault("info_level", "light")
-    scale_mode = str(env_cfg.get("reward_distance_scale_mode", ""))
-    if scale_mode.startswith("dataset_"):
-        env_cfg["reward_distance_scale_mode"] = scale_mode[len("dataset_") :]
-
+    env_cfg = _expert_env_config(cfg)
     selected = list(records[: max_records or len(records)])
     data_cfg = cfg.get("data", {}) or {}
     num_customers = int(data_cfg.get("num_customers", 0) or 0)
@@ -235,80 +371,80 @@ def build_expert_trajectories(
     make_terran_env, _ = _load_terran_runtime()
 
     for record in selected:
-        clean_routes = _clean_routes(record.routes)
-        same_route_matrix = (
-            same_route_matrix_from_routes(clean_routes, num_customers)
-            if num_customers > 0
-            else None
+        item, invalid_step, objective_error, route_count = _replay_expert_record(
+            record,
+            env_cfg=env_cfg,
+            make_terran_env=make_terran_env,
+            num_customers=num_customers,
+            store_observations=True,
         )
-        route_counts.append(len(clean_routes))
-        env = make_terran_env(instance=record.instance, n_traj=1, pbrs_config=None, **env_cfg)
-        obs, info = env.reset()
-        observations: list[dict[str, np.ndarray]] = []
-        actions: list[int] = []
-        invalid_step: dict[str, Any] | None = None
-        for step_idx, action in enumerate(route_actions(clean_routes)):
-            action_i = int(action)
-            mask = np.asarray(obs["action_mask"], dtype=bool)
-            if mask.shape[0] != 1 or action_i < 0 or action_i >= mask.shape[1] or not bool(mask[0, action_i]):
-                invalid_step = {
-                    "instance_id": record.instance_id,
-                    "step": step_idx,
-                    "action": action_i,
-                    "mask_shape": tuple(mask.shape),
-                }
-                break
-            observations.append({key: np.asarray(value).copy() for key, value in obs.items()})
-            actions.append(action_i)
-            obs, reward, terminated, truncated, info = env.step(np.asarray([action_i], dtype=np.int64))
-            if bool(np.asarray(truncated, dtype=bool)[0]):
-                invalid_step = {
-                    "instance_id": record.instance_id,
-                    "step": step_idx,
-                    "action": action_i,
-                    "reason": "truncated_after_expert_action",
-                }
-                break
-        success = bool(np.asarray(info.get("success", [False]), dtype=bool)[0])
-        if invalid_step is not None or not success:
-            invalid_records.append(
-                invalid_step
-                or {
-                    "instance_id": record.instance_id,
-                    "reason": "expert_route_replay_not_successful",
-                    "served": int(np.asarray(info.get("served_customers", [0]))[0]),
-                }
-            )
+        route_counts.append(route_count)
+        if invalid_step is not None:
+            invalid_records.append(invalid_step)
             continue
-        if actions:
-            objective = np.asarray(info.get("objective_distance_km", []), dtype=np.float64).reshape(-1)
-            if objective.size > 0 and np.isfinite(objective[0]):
-                objective_errors.append(abs(float(objective[0]) - float(record.objective_distance_km)))
-            trajectories.append(
-                ExpertTrajectory(
-                    instance_id=record.instance_id,
-                    observations=observations,
-                    actions=actions,
-                    objective_distance_km=record.objective_distance_km,
-                    vehicle_count=record.vehicle_count,
-                    same_route_matrix=same_route_matrix,
-                )
-            )
+        if objective_error is not None:
+            objective_errors.append(objective_error)
+        if isinstance(item, ExpertTrajectory):
+            trajectories.append(item)
     if strict and invalid_records:
         raise ValueError(f"{len(invalid_records)} expert routes failed replay; first={invalid_records[0]}")
-    stats = {
-        "records_seen": len(selected),
-        "trajectories": len(trajectories),
-        "invalid_records": len(invalid_records),
-        "steps": int(sum(traj.length for traj in trajectories)),
-        "avg_steps_per_route": float(np.mean([traj.length for traj in trajectories])) if trajectories else 0.0,
-        "expert_replay_success_rate": float(len(trajectories) / max(len(selected), 1)),
-        "expert_action_valid_ratio": float(1.0 - len(invalid_records) / max(len(selected), 1)),
-        "expert_env_replay_obj_error_mean": float(np.mean(objective_errors)) if objective_errors else float("nan"),
-        "expert_env_replay_obj_error_max": float(np.max(objective_errors)) if objective_errors else float("nan"),
-        "expert_route_count_mean": float(np.mean(route_counts)) if route_counts else 0.0,
-    }
+    stats = _expert_replay_stats(
+        selected_count=len(selected),
+        item_count=len(trajectories),
+        invalid_records=invalid_records,
+        objective_errors=objective_errors,
+        route_counts=route_counts,
+        steps=sum(traj.length for traj in trajectories),
+    )
     return trajectories, stats
+
+
+def build_expert_references(
+    records: Sequence[ExpertRecord],
+    cfg: dict[str, Any],
+    *,
+    max_records: int | None = None,
+    strict: bool = True,
+    seed: int = 0,
+) -> tuple[list[ExpertReference], dict[str, Any]]:
+    del seed
+    env_cfg = _expert_env_config(cfg)
+    selected = list(records[: max_records or len(records)])
+    data_cfg = cfg.get("data", {}) or {}
+    num_customers = int(data_cfg.get("num_customers", 0) or 0)
+    references: list[ExpertReference] = []
+    invalid_records: list[dict[str, Any]] = []
+    objective_errors: list[float] = []
+    route_counts: list[int] = []
+    make_terran_env, _ = _load_terran_runtime()
+
+    for record in selected:
+        item, invalid_step, objective_error, route_count = _replay_expert_record(
+            record,
+            env_cfg=env_cfg,
+            make_terran_env=make_terran_env,
+            num_customers=num_customers,
+            store_observations=False,
+        )
+        route_counts.append(route_count)
+        if invalid_step is not None:
+            invalid_records.append(invalid_step)
+            continue
+        if objective_error is not None:
+            objective_errors.append(objective_error)
+        if isinstance(item, ExpertReference):
+            references.append(item)
+    if strict and invalid_records:
+        raise ValueError(f"{len(invalid_records)} expert routes failed replay; first={invalid_records[0]}")
+    stats = _expert_replay_stats(
+        selected_count=len(selected),
+        item_count=len(references),
+        invalid_records=invalid_records,
+        objective_errors=objective_errors,
+        route_counts=route_counts,
+        steps=sum(ref.length for ref in references),
+    )
+    return references, stats
 
 
 class ExpertReplayBuffer:
@@ -391,6 +527,108 @@ class ExpertReplayBuffer:
         action_tensor = torch.as_tensor(np.asarray(actions, dtype=np.int64)[:, None], dtype=torch.long)
         objective_tensor = torch.as_tensor(np.asarray(objectives, dtype=np.float32), dtype=torch.float32)
         return obs_batch, action_tensor, objective_tensor
+
+
+class ExpertLazyReplayBuffer:
+    def __init__(
+        self,
+        references: Sequence[ExpertReference],
+        cfg: dict[str, Any],
+        seed: int = 0,
+        replay_stats: dict[str, Any] | None = None,
+        cache_size: int = 64,
+        enable_lazy_trajectories: bool = True,
+    ) -> None:
+        self.references = list(references)
+        if not self.references:
+            raise ValueError("ExpertLazyReplayBuffer requires at least one reference")
+        self.rng = np.random.default_rng(int(seed))
+        self.replay_stats = dict(replay_stats or {})
+        self.objective_by_instance_id = {
+            str(ref.instance_id): float(ref.objective_distance_km)
+            for ref in self.references
+        }
+        self.reference_by_instance_id = {
+            str(ref.instance_id): ref
+            for ref in self.references
+        }
+        self.same_route_by_instance_id = {
+            str(ref.instance_id): np.asarray(ref.same_route_matrix, dtype=np.float32)
+            for ref in self.references
+            if ref.same_route_matrix is not None
+        }
+        self._num_steps = int(sum(ref.length for ref in self.references))
+        if self._num_steps <= 0:
+            raise ValueError("ExpertLazyReplayBuffer has no expert steps")
+        self._env_cfg = _expert_env_config(cfg)
+        data_cfg = cfg.get("data", {}) or {}
+        self._num_customers = int(data_cfg.get("num_customers", 0) or 0)
+        self._cache_size = max(0, int(cache_size))
+        self._enable_lazy_trajectories = bool(enable_lazy_trajectories)
+        self._trajectory_cache: OrderedDict[str, ExpertTrajectory] = OrderedDict()
+
+    @property
+    def num_trajectories(self) -> int:
+        return len(self.references)
+
+    @property
+    def num_steps(self) -> int:
+        return self._num_steps
+
+    def reference_objective(self, instance_id: str | None) -> float | None:
+        if instance_id is None:
+            return None
+        value = self.objective_by_instance_id.get(str(instance_id))
+        return None if value is None else float(value)
+
+    def trajectory_for_instance(self, instance_id: str | None) -> ExpertTrajectory | None:
+        if instance_id is None or not self._enable_lazy_trajectories:
+            return None
+        key = str(instance_id)
+        cached = self._trajectory_cache.get(key)
+        if cached is not None:
+            self._trajectory_cache.move_to_end(key)
+            return cached
+        ref = self.reference_by_instance_id.get(key)
+        if ref is None:
+            return None
+        make_terran_env, _ = _load_terran_runtime()
+        record = ExpertRecord(
+            instance_id=ref.instance_id,
+            instance=ref.instance,
+            routes=ref.routes,
+            objective_distance_km=ref.objective_distance_km,
+            vehicle_count=ref.vehicle_count,
+        )
+        item, invalid_step, _, _ = _replay_expert_record(
+            record,
+            env_cfg=self._env_cfg,
+            make_terran_env=make_terran_env,
+            num_customers=self._num_customers,
+            store_observations=True,
+        )
+        if invalid_step is not None or not isinstance(item, ExpertTrajectory):
+            return None
+        if self._cache_size > 0:
+            self._trajectory_cache[key] = item
+            self._trajectory_cache.move_to_end(key)
+            while len(self._trajectory_cache) > self._cache_size:
+                self._trajectory_cache.popitem(last=False)
+        return item
+
+    def same_route_matrix_for_instance(self, instance_id: str | None) -> np.ndarray | None:
+        if instance_id is None:
+            return None
+        return self.same_route_by_instance_id.get(str(instance_id))
+
+    def sample_step_batch(self, batch_size: int) -> tuple[dict[str, np.ndarray], torch.Tensor]:
+        raise ValueError("Lazy expert references do not support step-level BC sampling")
+
+    def sample_step_batch_with_objectives(
+        self,
+        batch_size: int,
+    ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor]:
+        raise ValueError("Lazy expert references do not support step-level BC sampling")
 
 
 def compute_bc_loss(agent, buffer: ExpertReplayBuffer, batch_size: int, device: str | torch.device):

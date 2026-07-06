@@ -51,7 +51,9 @@ from .instance_adapter import (
     problem_type_from_config,
 )
 from .offline_data import (
+    ExpertLazyReplayBuffer,
     ExpertReplayBuffer,
+    build_expert_references,
     build_expert_trajectories,
     compute_awbc_loss,
     compute_bc_loss,
@@ -3646,21 +3648,33 @@ def _compute_gcbpo_preference_loss(
     }
 
 
-def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, debug_file) -> ExpertReplayBuffer | None:
+def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, debug_file) -> ExpertReplayBuffer | ExpertLazyReplayBuffer | None:
     offline_cfg = cfg.get("offline", {}) or {}
     method = _offline_method(cfg)
-    need_archive = _requires_expert_routes(method) or _reference_advantage_enabled(cfg) or _sl_candidate_enabled(cfg)
+    adv_cfg = _advantage_config(cfg)
+    sl_expert_candidates = (
+        _is_sl_ppo_method(method)
+        and _sl_candidate_enabled(cfg)
+        and bool(adv_cfg.get("sl_candidate_use_expert_candidate", adv_cfg.get("sl_use_expert_candidate", True)))
+    )
+    full_step_archive = (
+        _requires_expert_routes(method)
+        or _is_sl_candidate_method(method)
+        or _is_partition_method(method)
+        or _is_hard_method(method)
+        or _is_hard_full_method(method)
+        or _is_bc_aux_method(method)
+        or _is_bafipo_method(method)
+        or _is_gcbpo_method(method)
+    )
+    need_archive = full_step_archive or _reference_advantage_enabled(cfg) or _sl_candidate_enabled(cfg) or sl_expert_candidates
     if method in {"", "none", "ppo"} and not need_archive:
         return None
-    if _is_sl_ppo_method(method):
-        need_archive = need_archive or _reference_advantage_enabled(cfg) or _sl_candidate_enabled(cfg)
-    if _is_sl_candidate_method(method):
-        need_archive = True
     if not need_archive:
         return None
     solution_path = offline_cfg.get("expert_solution_path") or offline_cfg.get("expert_csv_path")
     if not solution_path:
-        raise ValueError(f"offline.method={method!r} or reference advantage requires offline.expert_solution_path")
+        raise ValueError(f"offline.method={method!r} or solution-level reference requires offline.expert_solution_path")
     data_cfg = cfg.get("data", {}) or {}
     dataset_path = offline_cfg.get("expert_dataset_path") or data_cfg.get("train_dataset_path")
     if not dataset_path:
@@ -3687,22 +3701,52 @@ def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, deb
             problem_type=problem_type,
         )
     )
-    trajectories, stats = build_expert_trajectories(
-        records,
-        cfg,
-        max_records=offline_cfg.get("max_replay_records"),
-        strict=bool(offline_cfg.get("strict_replay", True)),
-        seed=seed + int(offline_cfg.get("replay_seed_offset", 17_000)),
-    )
-    stats["expert_checkpoint_s"] = float(offline_cfg["expert_checkpoint_s"]) if offline_cfg.get("expert_checkpoint_s") is not None else ""
-    stats["expert_reference_records"] = int(len(records))
-    stats["expert_dataset_instances"] = int(dataset_count)
-    stats["expert_reference_coverage"] = float(len(trajectories) / max(dataset_count, 1))
+    replay_seed = seed + int(offline_cfg.get("replay_seed_offset", 17_000))
+    if full_step_archive:
+        trajectories, stats = build_expert_trajectories(
+            records,
+            cfg,
+            max_records=offline_cfg.get("max_replay_records"),
+            strict=bool(offline_cfg.get("strict_replay", True)),
+            seed=replay_seed,
+        )
+        stats["expert_storage_mode"] = "full_step"
+        stats["expert_checkpoint_s"] = float(offline_cfg["expert_checkpoint_s"]) if offline_cfg.get("expert_checkpoint_s") is not None else ""
+        stats["expert_reference_records"] = int(len(records))
+        stats["expert_dataset_instances"] = int(dataset_count)
+        stats["expert_reference_coverage"] = float(len(trajectories) / max(dataset_count, 1))
+        buffer: ExpertReplayBuffer | ExpertLazyReplayBuffer = ExpertReplayBuffer(
+            trajectories,
+            seed=replay_seed,
+            replay_stats=stats,
+        )
+    else:
+        references, stats = build_expert_references(
+            records,
+            cfg,
+            max_records=offline_cfg.get("max_replay_records"),
+            strict=bool(offline_cfg.get("strict_replay", True)),
+            seed=replay_seed,
+        )
+        stats["expert_storage_mode"] = "lazy_trajectory" if sl_expert_candidates else "reference_only"
+        stats["expert_checkpoint_s"] = float(offline_cfg["expert_checkpoint_s"]) if offline_cfg.get("expert_checkpoint_s") is not None else ""
+        stats["expert_reference_records"] = int(len(records))
+        stats["expert_dataset_instances"] = int(dataset_count)
+        stats["expert_reference_coverage"] = float(len(references) / max(dataset_count, 1))
+        buffer = ExpertLazyReplayBuffer(
+            references,
+            cfg,
+            seed=replay_seed,
+            replay_stats=stats,
+            cache_size=int(offline_cfg.get("expert_lazy_cache_size", offline_cfg.get("sl_expert_lazy_cache_size", 64))),
+            enable_lazy_trajectories=sl_expert_candidates,
+        )
     _debug_log(
         debug_enabled,
         debug_file,
         "[OfflineArchive] "
-        f"method={method} records={stats['records_seen']} trajectories={stats['trajectories']} "
+        f"method={method} storage={stats['expert_storage_mode']} "
+        f"records={stats['records_seen']} trajectories={stats['trajectories']} "
         f"coverage={stats['expert_reference_coverage']:.6f} "
         f"checkpoint_s={stats['expert_checkpoint_s']} "
         f"invalid={stats['invalid_records']} steps={stats['steps']} "
@@ -3712,11 +3756,6 @@ def _load_expert_buffer(cfg: dict[str, Any], seed: int, debug_enabled: bool, deb
         f"obj_error_max={stats.get('expert_env_replay_obj_error_max', float('nan')):.6g} "
         f"route_count_mean={stats.get('expert_route_count_mean', 0.0):.3f} "
         f"solution_path={solution_path}",
-    )
-    buffer = ExpertReplayBuffer(
-        trajectories,
-        seed=seed + int(offline_cfg.get("replay_seed_offset", 17_000)),
-        replay_stats=stats,
     )
     return buffer
 
