@@ -2991,12 +2991,19 @@ def _compute_solution_level_weighted_logprob_loss(
 ) -> torch.Tensor:
     del device
     env_indices = np.asarray(env_indices, dtype=np.int64)
-    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
     loss = torch.zeros((), dtype=batch.old_logprobs.dtype, device=batch.old_logprobs.device)
     weights = weights.detach()
     valid_counts = valid_counts.detach().clamp_min(1.0)
     if not bool((weights != 0).any()):
+        # PPO clipping can leave a chunk with no SL gradient contribution.
+        # The caller still accumulates this loss unconditionally, so keep it
+        # connected to the graph while preserving a zero update.
+        for param in agent.parameters():
+            if param.requires_grad:
+                zero_source = param.reshape(-1)[0] if param.numel() else param.sum()
+                return zero_source * 0.0
         return loss
+    cached_state = agent.backbone.encode(_slice_obs_by_env(batch.observations[0], env_indices))
     for step in range(step_start, step_end):
         obs_mb = _slice_obs_by_env(batch.observations[step], env_indices)
         actions = batch.actions[step, env_indices].long()
